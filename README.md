@@ -21,13 +21,54 @@ bun install
 
 ## Usage
 
+### Running with Bun
+
 Start the server:
 
 ```bash
 bun run index.ts
 ```
 
-The server will start on port 3000 (configurable in `src/config.ts`).
+The server will start on port 3000 (configurable via `PORT` environment variable).
+
+### Running with Docker
+
+#### Using Docker Compose (Recommended)
+
+The easiest way to run with Docker:
+
+```bash
+docker-compose up -d
+```
+
+The cache directory (`./cache`) will be persisted as a volume. You can customize configuration using environment variables in a `.env` file or by setting them before running:
+
+```bash
+FALLBACK_SERVERS="https://blossom.primal.net" docker-compose up -d
+```
+
+**Note:** The default port mapping is `3000:3000`. To use a different port, either modify the `ports` section in `docker-compose.yml` or use `docker run` directly (see below).
+
+#### Using Docker directly
+
+Build the image:
+
+```bash
+docker build -t flower-cache .
+```
+
+Run the container:
+
+```bash
+docker run -d \
+  --name flower-cache \
+  -p 3000:3000 \
+  -v $(pwd)/cache:/app/cache \
+  -e FALLBACK_SERVERS="https://blossom.primal.net" \
+  flower-cache
+```
+
+The `-v $(pwd)/cache:/app/cache` flag mounts the local `./cache` directory as a volume, so cached blobs persist across container restarts.
 
 ## API Endpoints
 

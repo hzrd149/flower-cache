@@ -1,5 +1,6 @@
 // Main request handler for blob requests
 
+import { mergeBlossomServers } from "applesauce-common/helpers";
 import type { ParsedRequest } from "./types";
 import { ensureCacheDir, checkCache, writeCache } from "./cache";
 import { validateHash } from "./hash";
@@ -60,25 +61,53 @@ export async function handleBlobRequest(
   let contentType = getContentType(extension);
   let contentLength: number | null = null;
 
-  // Try server hints first
-  if (serverHints.length > 0) {
+  // Collect all servers from sx hints and as hints
+  const allServers: string[] = [...serverHints];
+
+  // Collect servers from as hints
+  if (authorPubkeys.length > 0) {
     console.log(
-      `[${sha256}] Found ${serverHints.length} sx hint(s):`,
-      serverHints,
+      `[${sha256}] Resolving ${authorPubkeys.length} as hint(s):`,
+      authorPubkeys,
     );
-  } else {
-    console.log(`[${sha256}] No sx hints provided`);
+    for (const pubkey of authorPubkeys) {
+      console.log(`[${sha256}] Resolving servers for as hint: ${pubkey}`);
+      const authorServers = await resolveAuthorServers(pubkey);
+      if (authorServers.length > 0) {
+        console.log(
+          `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}:`,
+          authorServers,
+        );
+      } else {
+        console.log(`[${sha256}] No servers found for ${pubkey}`);
+      }
+      allServers.push(...authorServers);
+    }
   }
 
-  for (const serverHint of serverHints) {
-    console.log(`[${sha256}] Trying sx hint: ${serverHint}`);
+  // Normalize and deduplicate all servers
+  const servers = mergeBlossomServers(allServers);
+  if (servers.length > 0) {
+    if (servers.length < allServers.length) {
+      console.log(
+        `[${sha256}] Deduplicated ${allServers.length} server(s) to ${servers.length}:`,
+        servers,
+      );
+    } else {
+      console.log(`[${sha256}] Trying ${servers.length} server(s):`, servers);
+    }
+  } else {
+    console.log(`[${sha256}] No servers to try`);
+  }
+
+  // Try all servers in order
+  for (const server of servers) {
+    console.log(`[${sha256}] Trying server: ${server}`);
     // Always fetch full blob (not range) to validate hash
-    const response = await fetchFromServer(serverHint, sha256, extension);
+    const response = await fetchFromServer(server, sha256, extension);
 
     if (response && response.ok) {
-      console.log(
-        `[${sha256}] ✓ Successfully fetched from sx hint: ${serverHint}`,
-      );
+      console.log(`[${sha256}] ✓ Successfully fetched from: ${server}`);
       // Get content type from response if available
       const responseContentType = response.headers.get("Content-Type");
       if (responseContentType) {
@@ -109,85 +138,7 @@ export async function handleBlobRequest(
       blobData = await response.blob();
       break;
     } else {
-      console.log(`[${sha256}] ✗ Failed to fetch from sx hint: ${serverHint}`);
-    }
-  }
-
-  // If not found in server hints, try author servers from all as hints
-  if (!blobData) {
-    if (authorPubkeys.length > 0) {
-      console.log(
-        `[${sha256}] No sx hints worked, resolving ${authorPubkeys.length} as hint(s):`,
-        authorPubkeys,
-      );
-    } else {
-      console.log(`[${sha256}] No sx hints worked and no as hints provided`);
-    }
-
-    // Collect all blossom servers from all as hints
-    const allAuthorServers: string[] = [];
-    for (const pubkey of authorPubkeys) {
-      console.log(`[${sha256}] Resolving servers for as hint: ${pubkey}`);
-      const authorServers = await resolveAuthorServers(pubkey);
-      if (authorServers.length > 0) {
-        console.log(
-          `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}:`,
-          authorServers,
-        );
-      } else {
-        console.log(`[${sha256}] No servers found for ${pubkey}`);
-      }
-      allAuthorServers.push(...authorServers);
-    }
-
-    if (allAuthorServers.length > 0) {
-      console.log(
-        `[${sha256}] Trying ${allAuthorServers.length} server(s) from all as hints`,
-      );
-    } else {
-      console.log(`[${sha256}] No servers found from any as hints`);
-    }
-
-    // Try all collected servers in order
-    for (const server of allAuthorServers) {
-      console.log(`[${sha256}] Trying server from as hint: ${server}`);
-      // Always fetch full blob to validate hash
-      const response = await fetchFromServer(server, sha256, extension);
-
-      if (response && response.ok) {
-        console.log(
-          `[${sha256}] ✓ Successfully fetched from as hint server: ${server}`,
-        );
-        const responseContentType = response.headers.get("Content-Type");
-        if (responseContentType) {
-          contentType = responseContentType;
-        }
-
-        const responseContentLength = response.headers.get("Content-Length");
-        if (responseContentLength) {
-          contentLength = parseInt(responseContentLength, 10);
-        }
-
-        if (isHead) {
-          const headers: Record<string, string> = {
-            "Content-Type": contentType,
-            "Accept-Ranges": "bytes",
-          };
-          if (contentLength !== null) {
-            headers["Content-Length"] = contentLength.toString();
-          }
-          // Still download to validate
-          blobData = await response.blob();
-          break;
-        }
-
-        blobData = await response.blob();
-        break;
-      } else {
-        console.log(
-          `[${sha256}] ✗ Failed to fetch from as hint server: ${server}`,
-        );
-      }
+      console.log(`[${sha256}] ✗ Failed to fetch from: ${server}`);
     }
   }
 

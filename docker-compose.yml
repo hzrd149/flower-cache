@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  flower-cache:
+    build: .
+    container_name: flower-cache
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./cache:/app/cache
+    environment:
+      - CACHE_DIR=${CACHE_DIR:-./cache}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30000}
+      - MAX_REDIRECTS=${MAX_REDIRECTS:-5}
+      - USER_SERVER_LIST_TIMEOUT=${USER_SERVER_LIST_TIMEOUT:-20000}
+      - LOOKUP_RELAYS=${LOOKUP_RELAYS:-}
+      - FALLBACK_SERVERS=${FALLBACK_SERVERS:-}
+    restart: unless-stopped

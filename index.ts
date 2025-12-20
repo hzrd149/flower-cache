@@ -54,3 +54,23 @@ const server = Bun.serve({
 
 console.log(`Blossom proxy server running at ${server.url}`);
 console.log(`Cache directory: ${CACHE_DIR}`);
+
+// Graceful shutdown handler
+const shutdown = async (signal: string) => {
+  console.log(`\nReceived ${signal}, shutting down gracefully...`);
+
+  // Stop accepting new connections
+  server.stop();
+
+  // Give existing requests time to complete
+  // Bun's server.stop() already handles this, but we can add a small delay
+  // to ensure in-flight requests finish
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  console.log("Server stopped gracefully");
+  process.exit(0);
+};
+
+// Handle termination signals
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
