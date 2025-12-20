@@ -5,7 +5,7 @@
   "private": true,
   "license": "MIT",
   "author": "hzrd149",
-  "bin": "index.ts",
+  "main": "index.ts",
   "scripts": {
     "start": "bun run index.ts",
     "dev": "bun --watch index.ts",
@@ -19,7 +19,6 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@types/debug": "^4.1.12",
     "applesauce-common": "^0.0.0-next-20251203172109",
     "applesauce-core": "^0.0.0-next-20251220152312",
     "applesauce-loaders": "^0.0.0-next-20251220152312",
