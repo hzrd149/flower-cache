@@ -1,5 +1,6 @@
 // Cache management functions
 
+import { mkdir } from "node:fs/promises";
 import { CACHE_DIR } from "./config";
 import type { BunFile } from "bun";
 
@@ -8,7 +9,7 @@ import type { BunFile } from "bun";
  */
 export async function ensureCacheDir(): Promise<void> {
   try {
-    await Bun.mkdir(CACHE_DIR, { recursive: true });
+    await mkdir(CACHE_DIR, { recursive: true });
   } catch (error) {
     // Directory might already exist, ignore
   }

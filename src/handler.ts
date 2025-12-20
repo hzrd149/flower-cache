@@ -2,11 +2,25 @@
 
 import { mergeBlossomServers } from "applesauce-common/helpers";
 import type { ParsedRequest } from "./types";
-import { ensureCacheDir, checkCache, writeCache } from "./cache";
-import { validateHash } from "./hash";
+import { ensureCacheDir, checkCache } from "./cache";
 import { fetchFromServer } from "./proxy";
 import { resolveAuthorServers } from "./author";
-import { FALLBACK_SERVERS } from "./config";
+import { FALLBACK_SERVERS, CACHE_DIR } from "./config";
+import { getOrCreateFetch } from "./request-queue";
+import { createHashAndCacheStream } from "./stream-utils";
+
+/**
+ * Normalize a server URL by adding protocol if missing
+ * Returns the URL with https:// protocol (preferred)
+ */
+function normalizeServerUrlForMerge(server: string): string {
+  // If already has protocol, return as-is
+  if (server.startsWith("http://") || server.startsWith("https://")) {
+    return server;
+  }
+  // Add https:// protocol (preferred)
+  return `https://${server}`;
+}
 import {
   getContentType,
   addCorsHeaders,
@@ -53,229 +67,336 @@ export async function handleBlobRequest(
     );
   }
 
-  // Not in cache, try to fetch from upstream servers
+  // Not in cache, try to fetch from upstream servers using request deduplication
   // Note: For range requests, we still fetch the full blob to validate hash
   console.log(`[${sha256}] Resolving blob request`);
 
-  let blobData: Blob | null = null;
-  let contentType = getContentType(extension);
-  let contentLength: number | null = null;
+  // Use request queue to deduplicate concurrent requests for the same blob
+  const fetchResult = await getOrCreateFetch(sha256, async () => {
+    let upstreamStream: ReadableStream<Uint8Array> | null = null;
+    let contentType = getContentType(extension);
+    let contentLength: number | null = null;
 
-  // Collect all servers from sx hints and as hints
-  const allServers: string[] = [...serverHints];
-
-  // Collect servers from as hints
-  if (authorPubkeys.length > 0) {
-    console.log(
-      `[${sha256}] Resolving ${authorPubkeys.length} as hint(s):`,
-      authorPubkeys,
+    // Collect all servers from sx hints and as hints
+    const allServers: string[] = [...serverHints].map(
+      normalizeServerUrlForMerge,
     );
-    for (const pubkey of authorPubkeys) {
-      console.log(`[${sha256}] Resolving servers for as hint: ${pubkey}`);
-      const authorServers = await resolveAuthorServers(pubkey);
-      if (authorServers.length > 0) {
+
+    // Collect servers from as hints
+    if (authorPubkeys.length > 0) {
+      console.log(
+        `[${sha256}] Resolving ${authorPubkeys.length} as hint(s):`,
+        authorPubkeys,
+      );
+      for (const pubkey of authorPubkeys) {
+        console.log(`[${sha256}] Resolving servers for as hint: ${pubkey}`);
+        const authorServers = await resolveAuthorServers(pubkey);
+        if (authorServers.length > 0) {
+          console.log(
+            `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}:`,
+            authorServers,
+          );
+        } else {
+          console.log(`[${sha256}] No servers found for ${pubkey}`);
+        }
+        // Author servers should already be full URLs from resolveAuthorServers,
+        // but normalize them just in case
+        allServers.push(...authorServers.map(normalizeServerUrlForMerge));
+      }
+    }
+
+    // Normalize and deduplicate all servers
+    const servers = mergeBlossomServers(allServers);
+    if (servers.length > 0) {
+      if (servers.length < allServers.length) {
         console.log(
-          `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}:`,
-          authorServers,
+          `[${sha256}] Deduplicated ${allServers.length} server(s) to ${servers.length}:`,
+          servers,
         );
       } else {
-        console.log(`[${sha256}] No servers found for ${pubkey}`);
+        console.log(`[${sha256}] Trying ${servers.length} server(s):`, servers);
       }
-      allServers.push(...authorServers);
-    }
-  }
-
-  // Normalize and deduplicate all servers
-  const servers = mergeBlossomServers(allServers);
-  if (servers.length > 0) {
-    if (servers.length < allServers.length) {
-      console.log(
-        `[${sha256}] Deduplicated ${allServers.length} server(s) to ${servers.length}:`,
-        servers,
-      );
     } else {
-      console.log(`[${sha256}] Trying ${servers.length} server(s):`, servers);
+      console.log(`[${sha256}] No servers to try`);
     }
-  } else {
-    console.log(`[${sha256}] No servers to try`);
-  }
 
-  // Try all servers in order
-  for (const server of servers) {
-    console.log(`[${sha256}] Trying server: ${server}`);
-    // Always fetch full blob (not range) to validate hash
-    const response = await fetchFromServer(server, sha256, extension);
+    // Try all servers in order
+    for (const server of servers) {
+      console.log(`[${sha256}] Trying server: ${server}`);
+      // Always fetch full blob (not range) to validate hash
+      const response = await fetchFromServer(server, sha256, extension);
 
-    if (response && response.ok) {
-      console.log(`[${sha256}] ✓ Successfully fetched from: ${server}`);
-      // Get content type from response if available
-      const responseContentType = response.headers.get("Content-Type");
-      if (responseContentType) {
-        contentType = responseContentType;
-      }
-
-      // Get content length
-      const responseContentLength = response.headers.get("Content-Length");
-      if (responseContentLength) {
-        contentLength = parseInt(responseContentLength, 10);
-      }
-
-      // For HEAD requests, return headers only (but we still need to validate hash)
-      if (isHead) {
-        const headers: Record<string, string> = {
-          "Content-Type": contentType,
-          "Accept-Ranges": "bytes",
-        };
-        if (contentLength !== null) {
-          headers["Content-Length"] = contentLength.toString();
-        }
-        // Still download to validate, but don't return body
-        blobData = await response.blob();
-        break;
-      }
-
-      // Fetch full blob for hash validation
-      blobData = await response.blob();
-      break;
-    } else {
-      console.log(`[${sha256}] ✗ Failed to fetch from: ${server}`);
-    }
-  }
-
-  // If still not found, try fallback servers
-  if (!blobData && FALLBACK_SERVERS.length > 0) {
-    console.log(
-      `[${sha256}] Trying ${FALLBACK_SERVERS.length} fallback server(s):`,
-      FALLBACK_SERVERS.map((url) => url.href),
-    );
-
-    for (const fallbackServer of FALLBACK_SERVERS) {
-      const serverUrl = fallbackServer.href;
-      console.log(`[${sha256}] Trying fallback server: ${serverUrl}`);
-      // Always fetch full blob to validate hash
-      const response = await fetchFromServer(serverUrl, sha256, extension);
-
-      if (response && response.ok) {
-        console.log(
-          `[${sha256}] ✓ Successfully fetched from fallback server: ${serverUrl}`,
-        );
+      if (response && response.ok && response.body) {
+        console.log(`[${sha256}] ✓ Successfully fetched from: ${server}`);
+        // Get content type from response if available
         const responseContentType = response.headers.get("Content-Type");
         if (responseContentType) {
           contentType = responseContentType;
         }
 
+        // Get content length
         const responseContentLength = response.headers.get("Content-Length");
         if (responseContentLength) {
           contentLength = parseInt(responseContentLength, 10);
         }
 
-        if (isHead) {
-          const headers: Record<string, string> = {
-            "Content-Type": contentType,
-            "Accept-Ranges": "bytes",
-          };
-          if (contentLength !== null) {
-            headers["Content-Length"] = contentLength.toString();
-          }
-          // Still download to validate
-          blobData = await response.blob();
-          break;
-        }
-
-        blobData = await response.blob();
+        // Get the response body as a stream (don't consume as blob)
+        upstreamStream = response.body;
         break;
       } else {
-        console.log(
-          `[${sha256}] ✗ Failed to fetch from fallback server: ${serverUrl}`,
-        );
+        console.log(`[${sha256}] ✗ Failed to fetch from: ${server}`);
       }
     }
-  }
+
+    // If still not found, try fallback servers
+    if (!upstreamStream && FALLBACK_SERVERS.length > 0) {
+      console.log(
+        `[${sha256}] Trying ${FALLBACK_SERVERS.length} fallback server(s):`,
+        FALLBACK_SERVERS.map((url) => url.href),
+      );
+
+      for (const fallbackServer of FALLBACK_SERVERS) {
+        const serverUrl = fallbackServer.href;
+        console.log(`[${sha256}] Trying fallback server: ${serverUrl}`);
+        // Always fetch full blob to validate hash
+        const response = await fetchFromServer(serverUrl, sha256, extension);
+
+        if (response && response.ok && response.body) {
+          console.log(
+            `[${sha256}] ✓ Successfully fetched from fallback server: ${serverUrl}`,
+          );
+          const responseContentType = response.headers.get("Content-Type");
+          if (responseContentType) {
+            contentType = responseContentType;
+          }
+
+          const responseContentLength = response.headers.get("Content-Length");
+          if (responseContentLength) {
+            contentLength = parseInt(responseContentLength, 10);
+          }
+
+          upstreamStream = response.body;
+          break;
+        } else {
+          console.log(
+            `[${sha256}] ✗ Failed to fetch from fallback server: ${serverUrl}`,
+          );
+        }
+      }
+    }
+
+    // If no stream found, return null
+    if (!upstreamStream) {
+      return {
+        stream: null,
+        contentType,
+        contentLength,
+        hashValidation: Promise.resolve(false),
+        cacheWrite: Promise.resolve(),
+      };
+    }
+
+    // Create hash and cache stream wrapper
+    const { stream, hashValidation, cacheWrite } = createHashAndCacheStream(
+      sha256,
+      upstreamStream,
+    );
+
+    return {
+      stream,
+      contentType,
+      contentLength,
+      hashValidation,
+      cacheWrite,
+    };
+  });
 
   // If still not found, return 404
-  if (!blobData) {
+  if (!fetchResult.stream) {
     console.log(`[${sha256}] ✗ Blob not found after trying all hints`);
     return createErrorResponse(404, "Blob not found");
   }
 
-  // Validate hash before caching
-  console.log(`[${sha256}] Validating hash...`);
-  const isValid = await validateHash(blobData, sha256);
-  if (!isValid) {
-    console.log(`[${sha256}] ✗ Hash validation failed`);
-    return createErrorResponse(
-      400,
-      "Hash mismatch: downloaded blob does not match requested sha256",
-    );
-  }
-  console.log(`[${sha256}] ✓ Hash validated, caching blob`);
+  const responseStream = fetchResult.stream;
+  const contentType = fetchResult.contentType;
+  const contentLength = fetchResult.contentLength;
+  const hashValidation = fetchResult.hashValidation;
 
-  // Cache the blob (always cache after validation)
-  await writeCache(sha256, blobData);
+  // Start hash validation in background (don't await yet)
+  hashValidation
+    .then(async (isValid) => {
+      if (!isValid) {
+        // Hash validation failed - delete invalid cache file
+        const cachePath = `${CACHE_DIR}/${sha256}`;
+        try {
+          const file = Bun.file(cachePath);
+          await file.delete();
+          console.log(`[${sha256}] ✗ Deleted invalid cache file`);
+        } catch (error) {
+          console.error(`[${sha256}] Error deleting invalid cache:`, error);
+        }
+      }
+    })
+    .catch((error) => {
+      console.error(`[${sha256}] Hash validation error:`, error);
+    });
 
-  // For HEAD requests, return headers only
+  // For HEAD requests, consume the stream to calculate hash but don't send body
   if (isHead) {
-    const headers = {
+    // Consume stream in background for hash calculation and caching
+    // Pipe to a null consumer to ensure all data is processed
+    const nullWriter = new WritableStream({
+      write() {
+        // Discard all data
+      },
+    });
+    responseStream.pipeTo(nullWriter).catch(() => {
+      // Ignore errors
+    });
+
+    // Return headers only (contentLength may be null if not provided by upstream)
+    const headers: Record<string, string> = {
       "Content-Type": contentType,
-      "Content-Length": blobData.size.toString(),
       "Accept-Ranges": "bytes",
       ETag: etag,
       ...getCacheControlHeaders(),
     };
+    if (contentLength !== null) {
+      headers["Content-Length"] = contentLength.toString();
+    }
     return addCorsHeaders(new Response(null, { status: 200, headers }));
   }
 
   // Handle range requests for GET requests
+  // Note: We still stream the full blob for hash validation, but only send the range
   if (rangeHeader) {
     const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d*)/);
     if (rangeMatch) {
       const start = parseInt(rangeMatch[1]!, 10);
-      const end = rangeMatch[2]
-        ? parseInt(rangeMatch[2]!, 10)
-        : blobData.size - 1;
+      const end = rangeMatch[2] ? parseInt(rangeMatch[2]!, 10) : null;
+
+      // For range requests with streaming, we need to know the total size
+      if (contentLength === null) {
+        // If we don't know the size, fall back to streaming the full response
+        return addCorsHeaders(
+          new Response(responseStream, {
+            status: 200,
+            headers: {
+              "Content-Type": contentType,
+              "Accept-Ranges": "bytes",
+              ETag: etag,
+              ...getCacheControlHeaders(),
+            },
+          }),
+        );
+      }
+
+      const endByte = end !== null ? end : contentLength - 1;
 
       // Validate range
       if (
         start < 0 ||
-        start >= blobData.size ||
-        end >= blobData.size ||
-        start > end
+        start >= contentLength ||
+        endByte >= contentLength ||
+        start > endByte
       ) {
         return createErrorResponse(416, "Range not satisfiable");
       }
 
-      const slicedBlob = blobData.slice(start, end + 1);
-      const contentLength = end - start + 1;
+      // Create a transform stream that handles range requests
+      const rangeStream = new ReadableStream({
+        start(controller) {
+          let bytesSkipped = 0;
+          let bytesSent = 0;
+          const rangeLength = endByte - start + 1;
 
-      const response = new Response(slicedBlob, {
-        status: 206,
-        headers: {
-          "Content-Type": contentType,
-          "Content-Length": contentLength.toString(),
-          "Content-Range": `bytes ${start}-${end}/${blobData.size}`,
-          "Accept-Ranges": "bytes",
-          ETag: etag,
-          ...getCacheControlHeaders(),
+          const reader = responseStream.getReader();
+
+          const pump = async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                if (bytesSkipped < start) {
+                  // Skip bytes until we reach the start
+                  const skipAmount = Math.min(
+                    start - bytesSkipped,
+                    value.length,
+                  );
+                  bytesSkipped += skipAmount;
+                  if (skipAmount < value.length) {
+                    // We've reached the start, send the rest of this chunk
+                    const remaining = value.slice(skipAmount);
+                    const toSend = Math.min(
+                      remaining.length,
+                      rangeLength - bytesSent,
+                    );
+                    if (toSend > 0) {
+                      controller.enqueue(remaining.slice(0, toSend));
+                      bytesSent += toSend;
+                    }
+                  }
+                } else {
+                  // We're in the range, send bytes
+                  const remaining = rangeLength - bytesSent;
+                  if (remaining <= 0) {
+                    // We've sent enough, cancel the reader
+                    reader.cancel();
+                    break;
+                  }
+                  const toSend = Math.min(value.length, remaining);
+                  controller.enqueue(value.slice(0, toSend));
+                  bytesSent += toSend;
+                  if (toSend < value.length) {
+                    // We've sent enough, cancel the reader
+                    reader.cancel();
+                    break;
+                  }
+                }
+              }
+              controller.close();
+            } catch (error) {
+              controller.error(error);
+            }
+          };
+
+          pump();
         },
       });
 
-      return addCorsHeaders(response);
+      const rangeLength = endByte - start + 1;
+      return addCorsHeaders(
+        new Response(rangeStream, {
+          status: 206,
+          headers: {
+            "Content-Type": contentType,
+            "Content-Length": rangeLength.toString(),
+            "Content-Range": `bytes ${start}-${endByte}/${contentLength}`,
+            "Accept-Ranges": "bytes",
+            ETag: etag,
+            ...getCacheControlHeaders(),
+          },
+        }),
+      );
     }
   }
 
-  // Return full blob for GET requests
-  const response = new Response(blobData, {
-    status: 200,
-    headers: {
-      "Content-Type": contentType,
-      "Content-Length": blobData.size.toString(),
-      "Accept-Ranges": "bytes",
-      ETag: etag,
-      ...getCacheControlHeaders(),
-    },
-  });
-
-  return addCorsHeaders(response);
+  // Return full stream for GET requests
+  return addCorsHeaders(
+    new Response(responseStream, {
+      status: 200,
+      headers: {
+        "Content-Type": contentType,
+        ...(contentLength !== null
+          ? { "Content-Length": contentLength.toString() }
+          : {}),
+        "Accept-Ranges": "bytes",
+        ETag: etag,
+        ...getCacheControlHeaders(),
+      },
+    }),
+  );
 }
 
 /**

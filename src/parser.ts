@@ -25,7 +25,9 @@ export function parseRequest(url: URL): ParsedRequest | null {
 
   // Extract query parameters
   const authorPubkeys = url.searchParams.getAll("as").filter(isHexKey);
-  const serverHints = url.searchParams.getAll("sx");
+  const serverHints = url.searchParams
+    .getAll("sx")
+    .map((s) => (s.startsWith("http") ? s : `https://${s}`));
 
   return {
     sha256,
