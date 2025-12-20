@@ -4,13 +4,17 @@ A high-performance Blossom proxy server that caches blobs locally and proxies re
 
 ## Features
 
+- **Streaming Responses**: Streams blob data to clients immediately as it arrives from upstream servers, reducing latency for large files
+- **Incremental Hash Calculation**: Calculates SHA-256 hash incrementally while streaming, validating blob integrity without buffering
+- **Streaming Cache Writes**: Writes blobs to cache incrementally as data arrives, minimizing memory usage
+- **Request Deduplication**: Multiple concurrent requests for the same blob share a single upstream fetch, eliminating redundant network traffic
 - **Local Caching**: Automatically caches downloaded blobs to disk for fast subsequent access
 - **SHA-256 Validation**: Validates blob integrity before caching to ensure data integrity
 - **ETag Support**: Implements HTTP ETags for efficient client-side caching (304 Not Modified responses)
 - **Range Requests**: Supports HTTP range requests for partial content delivery (video streaming, resume downloads)
 - **Multi-Server Proxying**: Tries multiple upstream servers in order until blob is found
 - **CORS Support**: Full CORS headers for cross-origin requests
-- **Author Server Resolution**: Stub for BUD-03 author server list resolution (ready for implementation)
+- **Author Server Resolution**: BUD-03 author server list resolution for automatic server discovery
 - **High Performance**: Built with [Bun](https://bun.com) for maximum speed
 
 ## Installation
@@ -114,13 +118,18 @@ CORS preflight requests are automatically handled.
 
 1. **Request Parsing**: Extracts SHA-256 hash, file extension, and query parameters from URL
 2. **Cache Check**: First checks local cache directory (`./cache/`) for the blob
-3. **Server Proxying**: If not cached, tries upstream servers in this order:
+3. **Request Deduplication**: If multiple requests arrive for the same uncached blob, they share a single upstream fetch
+4. **Server Proxying**: If not cached, tries upstream servers in this order:
    - Server hints from `sx` query parameter
    - Author servers (from `as` query parameter via BUD-03 resolution)
    - Fallback servers (from `FALLBACK_SERVERS` environment variable, if configured)
-4. **Hash Validation**: Validates downloaded blob matches requested SHA-256 hash
-5. **Caching**: Stores validated blob in local cache for future requests
-6. **Response**: Returns blob with proper headers (Content-Type, ETag, Cache-Control)
+5. **Streaming Processing**: As data arrives from upstream:
+   - Streams data immediately to waiting clients
+   - Calculates SHA-256 hash incrementally
+   - Writes chunks to cache file as they arrive
+6. **Hash Validation**: After stream completes, validates computed hash matches requested SHA-256 hash
+7. **Cache Cleanup**: If hash validation fails, invalid cache file is automatically deleted
+8. **Response**: Returns blob with proper headers (Content-Type, ETag, Cache-Control)
 
 ## Caching
 
