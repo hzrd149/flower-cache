@@ -5,6 +5,7 @@
   "private": true,
   "license": "MIT",
   "author": "hzrd149",
+  "bin": "index.ts",
   "scripts": {
     "start": "bun run index.ts",
     "dev": "bun --watch index.ts",
