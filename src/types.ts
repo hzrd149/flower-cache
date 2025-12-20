@@ -6,4 +6,3 @@ export interface ParsedRequest {
   authorPubkeys: string[];
   serverHints: string[];
 }
-

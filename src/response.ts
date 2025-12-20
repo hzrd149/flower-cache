@@ -1,6 +1,6 @@
 // Response handling utilities
 
-import { MIME_TYPES } from "./config";
+import mime from "mime";
 
 /**
  * Get content type from file extension
@@ -11,7 +11,7 @@ export function getContentType(extension?: string): string {
   }
 
   const lowerExt = extension.toLowerCase();
-  return MIME_TYPES[lowerExt] || "application/octet-stream";
+  return mime.getType(extension) || "application/octet-stream";
 }
 
 /**
@@ -34,10 +34,10 @@ export function checkIfNoneMatch(request: Request, etag: string): boolean {
 
   // If-None-Match can contain multiple ETags separated by commas
   // Also handle weak ETags (W/"...") and quoted ETags
-  const etags = ifNoneMatch.split(",").map(e => e.trim().replace(/^W\//, ""));
+  const etags = ifNoneMatch.split(",").map((e) => e.trim().replace(/^W\//, ""));
   const normalizedETag = etag.replace(/^W\//, "");
 
-  return etags.some(e => e === normalizedETag || e === etag);
+  return etags.some((e) => e === normalizedETag || e === etag);
 }
 
 /**
@@ -47,7 +47,7 @@ export function createNotModifiedResponse(etag: string): Response {
   const response = new Response(null, {
     status: 304,
     headers: {
-      "ETag": etag,
+      ETag: etag,
       "Cache-Control": "public, max-age=31536000, immutable", // 1 year, immutable since content-addressed
     },
   });
@@ -86,4 +86,3 @@ export function createErrorResponse(status: number, reason: string): Response {
   response.headers.set("X-Reason", reason);
   return addCorsHeaders(response);
 }
-

@@ -25,7 +25,7 @@ export async function fetchFromServer(
   sha256: string,
   extension?: string,
   rangeHeader?: string,
-  redirectCount: number = 0
+  redirectCount: number = 0,
 ): Promise<Response | null> {
   if (redirectCount > MAX_REDIRECTS) {
     return null; // Too many redirects
@@ -59,7 +59,13 @@ export async function fetchFromServer(
           const location = response.headers.get("Location");
           if (location && location.includes(sha256)) {
             // Recursively follow redirect with increased count
-            return fetchFromServer(location, sha256, extension, rangeHeader, redirectCount + 1);
+            return fetchFromServer(
+              location,
+              sha256,
+              extension,
+              rangeHeader,
+              redirectCount + 1,
+            );
           }
         }
 
@@ -91,4 +97,3 @@ export async function fetchFromServer(
 
   return null;
 }
-

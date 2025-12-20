@@ -39,8 +39,10 @@ export async function checkCache(sha256: string): Promise<BunFile | null> {
 /**
  * Write a blob to cache
  */
-export async function writeCache(sha256: string, data: Blob | ArrayBuffer): Promise<void> {
+export async function writeCache(
+  sha256: string,
+  data: Blob | ArrayBuffer,
+): Promise<void> {
   const cachePath = getCachePath(sha256);
   await Bun.write(cachePath, data);
 }
-

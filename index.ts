@@ -30,7 +30,10 @@ const server = Bun.serve({
       const parsed = parseRequest(url);
 
       if (!parsed) {
-        return createErrorResponse(400, "Invalid request: expected /<sha256>[.ext] format");
+        return createErrorResponse(
+          400,
+          "Invalid request: expected /<sha256>[.ext] format",
+        );
       }
 
       try {
@@ -39,7 +42,7 @@ const server = Bun.serve({
         console.error("Error handling request:", error);
         return createErrorResponse(
           500,
-          `Internal server error: ${error instanceof Error ? error.message : "Unknown error"}`
+          `Internal server error: ${error instanceof Error ? error.message : "Unknown error"}`,
         );
       }
     }

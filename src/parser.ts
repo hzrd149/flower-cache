@@ -1,5 +1,6 @@
 // URL parsing utilities
 
+import { isHexKey } from "applesauce-core/helpers";
 import type { ParsedRequest } from "./types";
 
 /**
@@ -23,7 +24,7 @@ export function parseRequest(url: URL): ParsedRequest | null {
   const extension = match[2] || undefined;
 
   // Extract query parameters
-  const authorPubkeys = url.searchParams.getAll("as");
+  const authorPubkeys = url.searchParams.getAll("as").filter(isHexKey);
   const serverHints = url.searchParams.getAll("sx");
 
   return {
@@ -33,4 +34,3 @@ export function parseRequest(url: URL): ParsedRequest | null {
     serverHints,
   };
 }
-

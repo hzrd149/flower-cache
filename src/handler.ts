@@ -5,6 +5,7 @@ import { ensureCacheDir, checkCache, writeCache } from "./cache";
 import { validateHash } from "./hash";
 import { fetchFromServer } from "./proxy";
 import { resolveAuthorServers } from "./author";
+import { FALLBACK_SERVERS } from "./config";
 import {
   getContentType,
   addCorsHeaders,
@@ -21,7 +22,7 @@ import {
  */
 export async function handleBlobRequest(
   req: Request,
-  parsed: ParsedRequest
+  parsed: ParsedRequest,
 ): Promise<Response> {
   const { sha256, extension, authorPubkeys, serverHints } = parsed;
   const isHead = req.method === "HEAD";
@@ -40,21 +41,44 @@ export async function handleBlobRequest(
   // Check cache first
   const cachedFile = await checkCache(sha256);
   if (cachedFile) {
-    return handleCachedFile(req, cachedFile, extension, isHead, rangeHeader, etag);
+    console.log(`[${sha256}] ✓ Found in cache`);
+    return handleCachedFile(
+      req,
+      cachedFile,
+      extension,
+      isHead,
+      rangeHeader,
+      etag,
+    );
   }
 
   // Not in cache, try to fetch from upstream servers
   // Note: For range requests, we still fetch the full blob to validate hash
+  console.log(`[${sha256}] Resolving blob request`);
+
   let blobData: Blob | null = null;
   let contentType = getContentType(extension);
   let contentLength: number | null = null;
 
   // Try server hints first
+  if (serverHints.length > 0) {
+    console.log(
+      `[${sha256}] Found ${serverHints.length} sx hint(s):`,
+      serverHints,
+    );
+  } else {
+    console.log(`[${sha256}] No sx hints provided`);
+  }
+
   for (const serverHint of serverHints) {
+    console.log(`[${sha256}] Trying sx hint: ${serverHint}`);
     // Always fetch full blob (not range) to validate hash
     const response = await fetchFromServer(serverHint, sha256, extension);
 
     if (response && response.ok) {
+      console.log(
+        `[${sha256}] ✓ Successfully fetched from sx hint: ${serverHint}`,
+      );
       // Get content type from response if available
       const responseContentType = response.headers.get("Content-Type");
       if (responseContentType) {
@@ -84,59 +108,156 @@ export async function handleBlobRequest(
       // Fetch full blob for hash validation
       blobData = await response.blob();
       break;
+    } else {
+      console.log(`[${sha256}] ✗ Failed to fetch from sx hint: ${serverHint}`);
     }
   }
 
-  // If not found in server hints, try author servers
+  // If not found in server hints, try author servers from all as hints
   if (!blobData) {
+    if (authorPubkeys.length > 0) {
+      console.log(
+        `[${sha256}] No sx hints worked, resolving ${authorPubkeys.length} as hint(s):`,
+        authorPubkeys,
+      );
+    } else {
+      console.log(`[${sha256}] No sx hints worked and no as hints provided`);
+    }
+
+    // Collect all blossom servers from all as hints
+    const allAuthorServers: string[] = [];
     for (const pubkey of authorPubkeys) {
+      console.log(`[${sha256}] Resolving servers for as hint: ${pubkey}`);
       const authorServers = await resolveAuthorServers(pubkey);
-      for (const server of authorServers) {
-        // Always fetch full blob to validate hash
-        const response = await fetchFromServer(server, sha256, extension);
+      if (authorServers.length > 0) {
+        console.log(
+          `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}:`,
+          authorServers,
+        );
+      } else {
+        console.log(`[${sha256}] No servers found for ${pubkey}`);
+      }
+      allAuthorServers.push(...authorServers);
+    }
 
-        if (response && response.ok) {
-          const responseContentType = response.headers.get("Content-Type");
-          if (responseContentType) {
-            contentType = responseContentType;
+    if (allAuthorServers.length > 0) {
+      console.log(
+        `[${sha256}] Trying ${allAuthorServers.length} server(s) from all as hints`,
+      );
+    } else {
+      console.log(`[${sha256}] No servers found from any as hints`);
+    }
+
+    // Try all collected servers in order
+    for (const server of allAuthorServers) {
+      console.log(`[${sha256}] Trying server from as hint: ${server}`);
+      // Always fetch full blob to validate hash
+      const response = await fetchFromServer(server, sha256, extension);
+
+      if (response && response.ok) {
+        console.log(
+          `[${sha256}] ✓ Successfully fetched from as hint server: ${server}`,
+        );
+        const responseContentType = response.headers.get("Content-Type");
+        if (responseContentType) {
+          contentType = responseContentType;
+        }
+
+        const responseContentLength = response.headers.get("Content-Length");
+        if (responseContentLength) {
+          contentLength = parseInt(responseContentLength, 10);
+        }
+
+        if (isHead) {
+          const headers: Record<string, string> = {
+            "Content-Type": contentType,
+            "Accept-Ranges": "bytes",
+          };
+          if (contentLength !== null) {
+            headers["Content-Length"] = contentLength.toString();
           }
-
-          const responseContentLength = response.headers.get("Content-Length");
-          if (responseContentLength) {
-            contentLength = parseInt(responseContentLength, 10);
-          }
-
-          if (isHead) {
-            const headers: Record<string, string> = {
-              "Content-Type": contentType,
-              "Accept-Ranges": "bytes",
-            };
-            if (contentLength !== null) {
-              headers["Content-Length"] = contentLength.toString();
-            }
-            // Still download to validate
-            blobData = await response.blob();
-            break;
-          }
-
+          // Still download to validate
           blobData = await response.blob();
           break;
         }
+
+        blobData = await response.blob();
+        break;
+      } else {
+        console.log(
+          `[${sha256}] ✗ Failed to fetch from as hint server: ${server}`,
+        );
       }
-      if (blobData) break;
+    }
+  }
+
+  // If still not found, try fallback servers
+  if (!blobData && FALLBACK_SERVERS.length > 0) {
+    console.log(
+      `[${sha256}] Trying ${FALLBACK_SERVERS.length} fallback server(s):`,
+      FALLBACK_SERVERS.map((url) => url.href),
+    );
+
+    for (const fallbackServer of FALLBACK_SERVERS) {
+      const serverUrl = fallbackServer.href;
+      console.log(`[${sha256}] Trying fallback server: ${serverUrl}`);
+      // Always fetch full blob to validate hash
+      const response = await fetchFromServer(serverUrl, sha256, extension);
+
+      if (response && response.ok) {
+        console.log(
+          `[${sha256}] ✓ Successfully fetched from fallback server: ${serverUrl}`,
+        );
+        const responseContentType = response.headers.get("Content-Type");
+        if (responseContentType) {
+          contentType = responseContentType;
+        }
+
+        const responseContentLength = response.headers.get("Content-Length");
+        if (responseContentLength) {
+          contentLength = parseInt(responseContentLength, 10);
+        }
+
+        if (isHead) {
+          const headers: Record<string, string> = {
+            "Content-Type": contentType,
+            "Accept-Ranges": "bytes",
+          };
+          if (contentLength !== null) {
+            headers["Content-Length"] = contentLength.toString();
+          }
+          // Still download to validate
+          blobData = await response.blob();
+          break;
+        }
+
+        blobData = await response.blob();
+        break;
+      } else {
+        console.log(
+          `[${sha256}] ✗ Failed to fetch from fallback server: ${serverUrl}`,
+        );
+      }
     }
   }
 
   // If still not found, return 404
   if (!blobData) {
+    console.log(`[${sha256}] ✗ Blob not found after trying all hints`);
     return createErrorResponse(404, "Blob not found");
   }
 
   // Validate hash before caching
+  console.log(`[${sha256}] Validating hash...`);
   const isValid = await validateHash(blobData, sha256);
   if (!isValid) {
-    return createErrorResponse(400, "Hash mismatch: downloaded blob does not match requested sha256");
+    console.log(`[${sha256}] ✗ Hash validation failed`);
+    return createErrorResponse(
+      400,
+      "Hash mismatch: downloaded blob does not match requested sha256",
+    );
   }
+  console.log(`[${sha256}] ✓ Hash validated, caching blob`);
 
   // Cache the blob (always cache after validation)
   await writeCache(sha256, blobData);
@@ -147,7 +268,7 @@ export async function handleBlobRequest(
       "Content-Type": contentType,
       "Content-Length": blobData.size.toString(),
       "Accept-Ranges": "bytes",
-      "ETag": etag,
+      ETag: etag,
       ...getCacheControlHeaders(),
     };
     return addCorsHeaders(new Response(null, { status: 200, headers }));
@@ -158,10 +279,17 @@ export async function handleBlobRequest(
     const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d*)/);
     if (rangeMatch) {
       const start = parseInt(rangeMatch[1]!, 10);
-      const end = rangeMatch[2] ? parseInt(rangeMatch[2]!, 10) : blobData.size - 1;
+      const end = rangeMatch[2]
+        ? parseInt(rangeMatch[2]!, 10)
+        : blobData.size - 1;
 
       // Validate range
-      if (start < 0 || start >= blobData.size || end >= blobData.size || start > end) {
+      if (
+        start < 0 ||
+        start >= blobData.size ||
+        end >= blobData.size ||
+        start > end
+      ) {
         return createErrorResponse(416, "Range not satisfiable");
       }
 
@@ -175,7 +303,7 @@ export async function handleBlobRequest(
           "Content-Length": contentLength.toString(),
           "Content-Range": `bytes ${start}-${end}/${blobData.size}`,
           "Accept-Ranges": "bytes",
-          "ETag": etag,
+          ETag: etag,
           ...getCacheControlHeaders(),
         },
       });
@@ -191,7 +319,7 @@ export async function handleBlobRequest(
       "Content-Type": contentType,
       "Content-Length": blobData.size.toString(),
       "Accept-Ranges": "bytes",
-      "ETag": etag,
+      ETag: etag,
       ...getCacheControlHeaders(),
     },
   });
@@ -208,7 +336,7 @@ async function handleCachedFile(
   extension: string | undefined,
   isHead: boolean,
   rangeHeader: string | null,
-  etag: string
+  etag: string,
 ): Promise<Response> {
   // Check If-None-Match for conditional requests (skip for range requests)
   if (!rangeHeader && checkIfNoneMatch(req, etag)) {
@@ -228,7 +356,7 @@ async function handleCachedFile(
         "Content-Type": contentType,
         "Content-Length": stats.size.toString(),
         "Accept-Ranges": "bytes",
-        "ETag": etag,
+        ETag: etag,
         ...getCacheControlHeaders(),
       },
     });
@@ -240,7 +368,12 @@ async function handleCachedFile(
       const end = rangeMatch[2] ? parseInt(rangeMatch[2]!, 10) : stats.size - 1;
 
       // Validate range
-      if (start < 0 || start >= stats.size || end >= stats.size || start > end) {
+      if (
+        start < 0 ||
+        start >= stats.size ||
+        end >= stats.size ||
+        start > end
+      ) {
         return createErrorResponse(416, "Range not satisfiable");
       }
 
@@ -254,7 +387,7 @@ async function handleCachedFile(
           "Content-Length": contentLength.toString(),
           "Content-Range": `bytes ${start}-${end}/${stats.size}`,
           "Accept-Ranges": "bytes",
-          "ETag": etag,
+          ETag: etag,
           ...getCacheControlHeaders(),
         },
       });
@@ -283,4 +416,3 @@ async function handleCachedFile(
 
   return addCorsHeaders(response);
 }
-

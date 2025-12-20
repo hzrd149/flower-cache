@@ -36,12 +36,14 @@ The server will start on port 3000 (configurable in `src/config.ts`).
 Retrieve a blob by its SHA-256 hash.
 
 **Parameters:**
+
 - `sha256` (path): 64-character hexadecimal SHA-256 hash of the blob
 - `.ext` (optional): File extension (e.g., `.pdf`, `.png`)
 - `as` (query, optional): Author pubkey(s) for server discovery (can be repeated)
 - `sx` (query, optional): Server hint(s) where blob may be available (can be repeated)
 
 **Example:**
+
 ```bash
 # Basic request
 curl http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf
@@ -58,11 +60,12 @@ curl "http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab9
 Check if a blob exists without downloading it.
 
 **Example:**
+
 ```bash
 curl -I http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf
 ```
 
-### OPTIONS /*
+### OPTIONS /\*
 
 CORS preflight requests are automatically handled.
 
@@ -72,7 +75,8 @@ CORS preflight requests are automatically handled.
 2. **Cache Check**: First checks local cache directory (`./cache/`) for the blob
 3. **Server Proxying**: If not cached, tries upstream servers in this order:
    - Server hints from `sx` query parameter
-   - Author servers (from `as` query parameter via BUD-03 resolution - stub for now)
+   - Author servers (from `as` query parameter via BUD-03 resolution)
+   - Fallback servers (from `FALLBACK_SERVERS` environment variable, if configured)
 4. **Hash Validation**: Validates downloaded blob matches requested SHA-256 hash
 5. **Caching**: Stores validated blob in local cache for future requests
 6. **Response**: Returns blob with proper headers (Content-Type, ETag, Cache-Control)
@@ -105,13 +109,38 @@ curl -H "Range: bytes=1024-" http://localhost:3000/<sha256>.mp4
 
 ## Configuration
 
-Edit `src/config.ts` to customize:
+All configuration can be done via environment variables. You can also edit `src/config.ts` directly, but environment variables take precedence.
 
-- `PORT`: Server port (default: 3000)
-- `CACHE_DIR`: Cache directory path (default: `./cache`)
-- `REQUEST_TIMEOUT`: Upstream request timeout in milliseconds (default: 30000)
-- `MAX_REDIRECTS`: Maximum redirect following depth (default: 5)
-- `MIME_TYPES`: File extension to MIME type mapping
+### Environment Variables
+
+| Variable                   | Description                                                                                                    | Default       |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------- |
+| `PORT`                     | Server port number                                                                                             | `3000`        |
+| `CACHE_DIR`                | Cache directory path where blobs are stored                                                                    | `./cache`     |
+| `REQUEST_TIMEOUT`          | Upstream request timeout in milliseconds                                                                       | `30000` (30s) |
+| `MAX_REDIRECTS`            | Maximum number of redirects to follow                                                                          | `5`           |
+| `USER_SERVER_LIST_TIMEOUT` | Timeout for looking up user server lists from Nostr relays (BUD-03) in milliseconds                            | `20000` (20s) |
+| `LOOKUP_RELAYS`            | Comma-separated list of Nostr relay URLs for author server lookup (BUD-03)                                     | (empty)       |
+| `FALLBACK_SERVERS`         | Comma-separated list of Blossom server URLs to try as last resort (must include protocol: http:// or https://) | (empty)       |
+
+### Using Multiple Environment Variables
+
+You can set multiple environment variables at once:
+
+```bash
+PORT=8080 CACHE_DIR="./my-cache" REQUEST_TIMEOUT=60000 FALLBACK_SERVERS="https://blossom.primal.net" bun run index.ts
+```
+
+Or use a `.env` file (Bun automatically loads `.env` files):
+
+```bash
+# .env
+PORT=8080
+CACHE_DIR=./my-cache
+REQUEST_TIMEOUT=60000
+LOOKUP_RELAYS=wss://relay1.example.com,wss://relay2.example.com
+FALLBACK_SERVERS=https://blossom.primal.net,https://cdn.example.com
+```
 
 ## Using from Web Apps
 
@@ -123,9 +152,9 @@ Convert BUD-01 URLs to use the proxy by extracting the server domain and adding 
 
 ```javascript
 // Transform BUD-01 URL to proxy URL
-function transformBud01Url(originalUrl, proxyBase = 'http://localhost:3000') {
+function transformBud01Url(originalUrl, proxyBase = "http://localhost:3000") {
   const url = new URL(originalUrl);
-  const pathParts = url.pathname.split('/').filter(Boolean);
+  const pathParts = url.pathname.split("/").filter(Boolean);
   const sha256WithExt = pathParts[pathParts.length - 1]; // e.g., "abc123...def.pdf"
 
   // Extract server domain (remove protocol)
@@ -133,13 +162,14 @@ function transformBud01Url(originalUrl, proxyBase = 'http://localhost:3000') {
 
   // Build proxy URL with sx parameter
   const proxyUrl = new URL(`/${sha256WithExt}`, proxyBase);
-  proxyUrl.searchParams.append('sx', server);
+  proxyUrl.searchParams.append("sx", server);
 
   return proxyUrl.toString();
 }
 
 // Example usage
-const originalUrl = 'https://cdn.example.com/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf';
+const originalUrl =
+  "https://cdn.example.com/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf";
 const proxyUrl = transformBud01Url(originalUrl);
 // Result: "http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com"
 ```
@@ -150,10 +180,10 @@ Convert BUD-10 URIs (with `blossom:` scheme) to proxy URLs, preserving server hi
 
 ```javascript
 // Transform BUD-10 URI to proxy URL
-function transformBud10Uri(blossomUri, proxyBase = 'http://localhost:3000') {
+function transformBud10Uri(blossomUri, proxyBase = "http://localhost:3000") {
   // Remove "blossom:" prefix and parse
-  const uri = blossomUri.replace(/^blossom:/, '');
-  const [pathPart, queryPart] = uri.split('?');
+  const uri = blossomUri.replace(/^blossom:/, "");
+  const [pathPart, queryPart] = uri.split("?");
 
   // Build proxy URL
   const proxyUrl = new URL(`/${pathPart}`, proxyBase);
@@ -162,15 +192,15 @@ function transformBud10Uri(blossomUri, proxyBase = 'http://localhost:3000') {
     const params = new URLSearchParams(queryPart);
 
     // Add sx parameters (server hints)
-    params.getAll('xs').forEach(server => {
+    params.getAll("xs").forEach((server) => {
       // Remove protocol if present
-      const cleanServer = server.replace(/^https?:\/\//, '');
-      proxyUrl.searchParams.append('sx', cleanServer);
+      const cleanServer = server.replace(/^https?:\/\//, "");
+      proxyUrl.searchParams.append("sx", cleanServer);
     });
 
     // Add as parameters (author pubkeys)
-    params.getAll('as').forEach(pubkey => {
-      proxyUrl.searchParams.append('as', pubkey);
+    params.getAll("as").forEach((pubkey) => {
+      proxyUrl.searchParams.append("as", pubkey);
     });
   }
 
@@ -178,7 +208,8 @@ function transformBud10Uri(blossomUri, proxyBase = 'http://localhost:3000') {
 }
 
 // Example usage
-const blossomUri = 'blossom:b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?xs=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0';
+const blossomUri =
+  "blossom:b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?xs=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0";
 const proxyUrl = transformBud10Uri(blossomUri);
 // Result: "http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
 ```
@@ -212,4 +243,3 @@ All error responses include an `X-Reason` header with a human-readable message:
 ## License
 
 MIT
-

@@ -5,6 +5,11 @@
   "private": true,
   "license": "MIT",
   "author": "hzrd149",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch index.ts",
+    "format": "prettier --w ."
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/hzrd149/flower-cache"
@@ -14,8 +19,14 @@
   },
   "dependencies": {
     "@types/debug": "^4.1.12",
+    "applesauce-common": "^0.0.0-next-20251203172109",
     "applesauce-core": "^0.0.0-next-20251220152312",
     "applesauce-loaders": "^0.0.0-next-20251220152312",
-    "applesauce-relay": "^0.0.0-next-20251220152312"
+    "applesauce-relay": "^0.0.0-next-20251220152312",
+    "mime": "^4.1.0",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "prettier": "^3.7.4"
   }
 }
