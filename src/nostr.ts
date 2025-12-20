@@ -5,7 +5,7 @@ import {
 import { defined, EventStore, firstValueFrom } from "applesauce-core";
 import { createEventLoaderForStore } from "applesauce-loaders/loaders";
 import { RelayPool } from "applesauce-relay";
-import { map, tap, timeout } from "rxjs";
+import { map, timeout } from "rxjs";
 import { LOOKUP_RELAYS, USER_SERVER_LIST_TIMEOUT } from "./config";
 
 export const eventStore = new EventStore();
@@ -21,13 +21,12 @@ export async function getAuthorServers(pubkey: string): Promise<URL[]> {
   if (cached) return getBlossomServersFromList(cached);
 
   return firstValueFrom(
-    eventStore.replaceable(BLOSSOM_SERVER_LIST_KIND, pubkey).pipe(
-      defined(),
-      timeout({ first: USER_SERVER_LIST_TIMEOUT }),
-      map(getBlossomServersFromList),
-      tap((v) => {
-        console.log("blossom server list", v);
-      }),
-    ),
+    eventStore
+      .replaceable(BLOSSOM_SERVER_LIST_KIND, pubkey)
+      .pipe(
+        defined(),
+        timeout({ first: USER_SERVER_LIST_TIMEOUT }),
+        map(getBlossomServersFromList),
+      ),
   );
 }
