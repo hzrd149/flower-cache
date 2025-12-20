@@ -1,0 +1,21 @@
+{
+  "name": "flower-cache",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "author": "hzrd149",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hzrd149/flower-cache"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@types/debug": "^4.1.12",
+    "applesauce-core": "^0.0.0-next-20251220152312",
+    "applesauce-loaders": "^0.0.0-next-20251220152312",
+    "applesauce-relay": "^0.0.0-next-20251220152312"
+  }
+}
