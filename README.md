@@ -9,6 +9,7 @@ A high-performance Blossom proxy server that caches blobs locally and proxies re
 - **Streaming Cache Writes**: Writes blobs to cache incrementally as data arrives, minimizing memory usage
 - **Request Deduplication**: Multiple concurrent requests for the same blob share a single upstream fetch, eliminating redundant network traffic
 - **Local Caching**: Automatically caches downloaded blobs to disk for fast subsequent access
+- **LRU Cache Pruning**: Automatically removes least-recently-used blobs when cache size limit is exceeded
 - **SHA-256 Validation**: Validates blob integrity before caching to ensure data integrity
 - **ETag Support**: Implements HTTP ETags for efficient client-side caching (304 Not Modified responses)
 - **Range Requests**: Supports HTTP range requests for partial content delivery (video streaming, resume downloads)
@@ -137,6 +138,18 @@ CORS preflight requests are automatically handled.
 
 Blobs are cached in the `./cache/` directory using the SHA-256 hash as the filename (no extension). The cache directory is created automatically on first run.
 
+The cache uses an SQLite database to track access times for each blob, enabling efficient Least-Recently-Used (LRU) pruning when a maximum cache size is configured. Access times are updated automatically on every cache hit, ensuring accurate tracking without relying on filesystem access times.
+
+#### Cache Size Management
+
+If `MAX_CACHE_SIZE` is configured, the cache will automatically prune least-recently-used blobs when the total cache size exceeds the limit. Pruning reduces the cache to 90% of the maximum size to provide headroom for new blobs.
+
+**Example:**
+
+- If `MAX_CACHE_SIZE=10GB` and the cache reaches 10GB, it will prune until it's at 9GB
+- The oldest accessed blobs (by `last_accessed` timestamp) are removed first
+- Pruning happens automatically after new blobs are written to cache
+
 ### HTTP Caching
 
 The server implements comprehensive HTTP caching:
@@ -167,6 +180,7 @@ All configuration can be done via environment variables. You can also edit `src/
 | -------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------- |
 | `PORT`                     | Server port number                                                                                             | `3000`        |
 | `CACHE_DIR`                | Cache directory path where blobs are stored                                                                    | `./cache`     |
+| `MAX_CACHE_SIZE`           | Maximum cache size (e.g., `10GB`, `500MB`, `1TB`). When exceeded, least-recently-used blobs are pruned.        | (no limit)    |
 | `REQUEST_TIMEOUT`          | Upstream request timeout in milliseconds                                                                       | `30000` (30s) |
 | `MAX_REDIRECTS`            | Maximum number of redirects to follow                                                                          | `5`           |
 | `USER_SERVER_LIST_TIMEOUT` | Timeout for looking up user server lists from Nostr relays (BUD-03) in milliseconds                            | `20000` (20s) |
@@ -181,12 +195,13 @@ You can set multiple environment variables at once:
 PORT=8080 CACHE_DIR="./my-cache" REQUEST_TIMEOUT=60000 FALLBACK_SERVERS="https://blossom.primal.net" bun run index.ts
 ```
 
-Or use a `.env` file (Bun automatically loads `.env` files):
+Or use a `.env` file (Bun automatically loads `.env` files). See `.env.example` for a complete example:
 
 ```bash
 # .env
 PORT=8080
 CACHE_DIR=./my-cache
+MAX_CACHE_SIZE=10GB
 REQUEST_TIMEOUT=60000
 LOOKUP_RELAYS=wss://relay1.example.com,wss://relay2.example.com
 FALLBACK_SERVERS=https://blossom.primal.net,https://cdn.example.com

@@ -5,6 +5,7 @@ import { PORT, CACHE_DIR } from "./src/config";
 import { parseRequest } from "./src/parser";
 import { handleBlobRequest } from "./src/handler";
 import { createErrorResponse } from "./src/response";
+import { initializeCache } from "./src/cache";
 
 // Main server
 const server = Bun.serve({
@@ -51,6 +52,9 @@ const server = Bun.serve({
     return createErrorResponse(405, "Method not allowed");
   },
 });
+
+// Initialize cache system before starting server
+await initializeCache();
 
 console.log(`Blossom proxy server running at ${server.url}`);
 console.log(`Cache directory: ${CACHE_DIR}`);

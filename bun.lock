@@ -9,6 +9,7 @@
         "applesauce-core": "^0.0.0-next-20251220152312",
         "applesauce-loaders": "^0.0.0-next-20251220152312",
         "applesauce-relay": "^0.0.0-next-20251220152312",
+        "process-pastry": "https://github.com/hzrd149/process-pastry",
         "mime": "^4.1.0",
         "rxjs": "^7.8.2",
       },
@@ -60,6 +61,8 @@
     "nostr-wasm": ["nostr-wasm@0.1.0", "", {}, "sha512-78BTryCLcLYv96ONU8Ws3Q1JzjlAt+43pWQhIl86xZmWeegYCNLPml7yQ+gG3vR6V5h4XGj+TxO+SS5dsThQIA=="],
 
     "prettier": ["prettier@3.7.4", "", { "bin": { "prettier": "bin/prettier.cjs" } }, "sha512-v6UNi1+3hSlVvv8fSaoUbggEM5VErKmmpGA7Pl3HF8V6uKY7rvClBOJlH6yNwQtfTueNkGVpOv/mtWL9L4bgRA=="],
+
+    "process-pastry": ["process-pastry@github:hzrd149/process-pastry#87eaca9", { "peerDependencies": { "typescript": "^5" }, "bin": { "process-pastry": "./index.ts" } }, "hzrd149-process-pastry-87eaca9"],
 
     "rxjs": ["rxjs@7.8.2", "", { "dependencies": { "tslib": "^2.1.0" } }, "sha512-dhKf903U/PQZY6boNNtAGdWbG85WAbjT/1xYoZIC7FAY0yWapOBQVsVrDl58W86//e1VpMNBtRV4MaXfdMySFA=="],
 

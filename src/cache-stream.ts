@@ -2,6 +2,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { CACHE_DIR } from "./config";
+import { updateAccessTime, pruneCacheIfNeeded } from "./cache";
 
 /**
  * Get the cache file path for a given sha256 hash
@@ -39,6 +40,22 @@ export function createCacheStream(sha256: string): WritableStream<Uint8Array> {
         // Flush any remaining buffered data and close
         writer.end();
         writer = null;
+
+        // Update access time and trigger pruning check
+        try {
+          const file = Bun.file(cachePath);
+          const exists = await file.exists();
+          if (exists) {
+            const stats = await file.stat();
+            await updateAccessTime(sha256, stats.size);
+            // Trigger pruning check (don't await to avoid blocking)
+            pruneCacheIfNeeded().catch((error) => {
+              console.warn("Pruning check failed:", error);
+            });
+          }
+        } catch (error) {
+          console.warn(`Failed to update access time for ${sha256}:`, error);
+        }
       }
     },
     async abort(reason) {

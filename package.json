@@ -24,6 +24,7 @@
     "applesauce-loaders": "^0.0.0-next-20251220152312",
     "applesauce-relay": "^0.0.0-next-20251220152312",
     "mime": "^4.1.0",
+    "process-pastry": "https://github.com/hzrd149/process-pastry",
     "rxjs": "^7.8.2"
   },
   "devDependencies": {

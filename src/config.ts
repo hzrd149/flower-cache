@@ -34,3 +34,33 @@ export const FALLBACK_SERVERS = Bun.env.FALLBACK_SERVERS
       .filter((r) => URL.canParse(r))
       .map((r) => new URL(r))
   : [];
+
+/**
+ * Parse size string (e.g., "10GB", "500MB", "1TB") into bytes
+ * @returns Size in bytes, or null if invalid format
+ */
+function parseSize(sizeStr: string): number | null {
+  const match = sizeStr.trim().match(/^(\d+(?:\.\d+)?)\s*([KMGT]?B)$/i);
+  if (!match) return null;
+
+  const value = parseFloat(match[1]!);
+  const unit = match[2]!.toUpperCase();
+
+  const multipliers: Record<string, number> = {
+    B: 1,
+    KB: 1024,
+    MB: 1024 * 1024,
+    GB: 1024 * 1024 * 1024,
+    TB: 1024 * 1024 * 1024 * 1024,
+  };
+
+  const multiplier = multipliers[unit];
+  if (!multiplier) return null;
+
+  return Math.floor(value * multiplier);
+}
+
+/** Maximum cache size in bytes (null = no limit) */
+export const MAX_CACHE_SIZE: number | null = Bun.env.MAX_CACHE_SIZE
+  ? parseSize(Bun.env.MAX_CACHE_SIZE)
+  : null;
