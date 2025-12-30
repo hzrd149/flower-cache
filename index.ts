@@ -6,6 +6,7 @@ import { handleUploadRequest } from "./src/upload";
 import { handleDeleteRequest } from "./src/delete";
 import { createErrorResponse } from "./src/response";
 import { initializeCache } from "./src/cache";
+import { generateStatsPage } from "./src/stats";
 
 // Main server
 const server = Bun.serve({
@@ -24,6 +25,25 @@ const server = Bun.serve({
           "Access-Control-Max-Age": "86400",
         },
       });
+    }
+
+    // Handle GET / requests - serve stats page
+    if (req.method === "GET" && url.pathname === "/") {
+      try {
+        const html = await generateStatsPage();
+        return new Response(html, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+          },
+        });
+      } catch (error) {
+        console.error("Error generating stats page:", error);
+        return createErrorResponse(
+          500,
+          `Internal server error: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
+      }
     }
 
     // Handle PUT /upload requests (BUD-02)

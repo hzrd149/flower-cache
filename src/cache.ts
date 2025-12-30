@@ -134,7 +134,10 @@ function initDatabase(): Database {
     }
   } catch (error) {
     // Migration might fail if column already exists, ignore
-    console.warn("Migration check failed (this is usually safe to ignore):", error);
+    console.warn(
+      "Migration check failed (this is usually safe to ignore):",
+      error,
+    );
   }
 
   // Create index for efficient LRU queries
@@ -259,9 +262,10 @@ export async function updateAccessTime(
     }
 
     // Get existing uploaded timestamp to preserve it
-    const existingStmt = database.prepare<{ uploaded: number | null }, [string]>(
-      "SELECT uploaded FROM cache_metadata WHERE sha256 = ?",
-    );
+    const existingStmt = database.prepare<
+      { uploaded: number | null },
+      [string]
+    >("SELECT uploaded FROM cache_metadata WHERE sha256 = ?");
     const existing = existingStmt.get(sha256);
     const uploadedTimestamp = existing?.uploaded ?? null;
 
@@ -314,6 +318,29 @@ export async function getCacheSize(): Promise<number> {
   } catch (error) {
     console.warn("Failed to get cache size:", error);
     return 0;
+  }
+}
+
+/**
+ * Get cache statistics (blob count and total size)
+ * @returns Object with blobCount and totalSize (in bytes)
+ */
+export async function getCacheStats(): Promise<{
+  blobCount: number;
+  totalSize: number;
+}> {
+  try {
+    const database = await ensureDatabase();
+    const countQuery = database.query<{ count: number }, []>(
+      "SELECT COUNT(*) as count FROM cache_metadata",
+    );
+    const countRow = countQuery.get();
+    const blobCount = countRow ? countRow.count : 0;
+    const totalSize = await getCacheSize();
+    return { blobCount, totalSize };
+  } catch (error) {
+    console.warn("Failed to get cache stats:", error);
+    return { blobCount: 0, totalSize: 0 };
   }
 }
 

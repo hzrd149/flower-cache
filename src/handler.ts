@@ -5,7 +5,7 @@ import type { ParsedRequest } from "./types";
 import { ensureCacheDir, checkCache } from "./cache";
 import { fetchFromServer } from "./proxy";
 import { resolveAuthorServers } from "./author";
-import { FALLBACK_SERVERS, CACHE_DIR } from "./config";
+import { FALLBACK_SERVERS, CACHE_DIR, LOOKUP_RELAYS } from "./config";
 import { getOrCreateFetch } from "./request-queue";
 import { createHashAndCacheStream } from "./stream-utils";
 
@@ -84,24 +84,30 @@ export async function handleBlobRequest(
 
     // Collect servers from as hints
     if (authorPubkeys.length > 0) {
-      console.log(
-        `[${sha256}] Resolving ${authorPubkeys.length} as hint(s):`,
-        authorPubkeys,
-      );
-      for (const pubkey of authorPubkeys) {
-        console.log(`[${sha256}] Resolving servers for as hint: ${pubkey}`);
-        const authorServers = await resolveAuthorServers(pubkey);
-        if (authorServers.length > 0) {
-          console.log(
-            `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}:`,
-            authorServers,
-          );
-        } else {
-          console.log(`[${sha256}] No servers found for ${pubkey}`);
+      if (LOOKUP_RELAYS.length === 0) {
+        console.log(
+          `[${sha256}] Skipping as hint resolution: no lookup relays configured`,
+        );
+      } else {
+        console.log(
+          `[${sha256}] Resolving ${authorPubkeys.length} as hint(s):`,
+          authorPubkeys,
+        );
+        for (const pubkey of authorPubkeys) {
+          console.log(`[${sha256}] Resolving servers for as hint: ${pubkey}`);
+          const authorServers = await resolveAuthorServers(pubkey);
+          if (authorServers.length > 0) {
+            console.log(
+              `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}:`,
+              authorServers,
+            );
+          } else {
+            console.log(`[${sha256}] No servers found for ${pubkey}`);
+          }
+          // Author servers should already be full URLs from resolveAuthorServers,
+          // but normalize them just in case
+          allServers.push(...authorServers.map(normalizeServerUrlForMerge));
         }
-        // Author servers should already be full URLs from resolveAuthorServers,
-        // but normalize them just in case
-        allServers.push(...authorServers.map(normalizeServerUrlForMerge));
       }
     }
 
