@@ -26,6 +26,20 @@ bun install
 
 ## Usage
 
+### Running with bunx (Quick Start)
+
+Run directly from GitHub without cloning:
+
+```bash
+bunx https://github.com/hzrd149/flower-cache
+```
+
+The server will start on port 24242 (configurable via `PORT` environment variable). You can also set environment variables:
+
+```bash
+PORT=8080 FALLBACK_SERVERS="https://blossom.primal.net" bunx https://github.com/hzrd149/flower-cache
+```
+
 ### Running with Bun
 
 Start the server:
@@ -68,12 +82,12 @@ Run the container:
 docker run -d \
   --name flower-cache \
   -p 24242:24242 \
-  -v $(pwd)/cache:/app/cache \
+  -v $(pwd)/cache:/cache \
+  -e LOOKUP_RELAYS="wss://purplepag.es" \
   -e FALLBACK_SERVERS="https://blossom.primal.net" \
-  flower-cache
+  --restart unless-stopped \
+  ghcr.io/hzrd149/flower-cache:latest
 ```
-
-The `-v $(pwd)/cache:/app/cache` flag mounts the local `./cache` directory as a volume, so cached blobs persist across container restarts.
 
 ## API Endpoints
 
@@ -176,16 +190,17 @@ All configuration can be done via environment variables. You can also edit `src/
 
 ### Environment Variables
 
-| Variable                   | Description                                                                                                    | Default       |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------- |
-| `PORT`                     | Server port number                                                                                             | `24242`       |
-| `CACHE_DIR`                | Cache directory path where blobs are stored                                                                    | `./cache`     |
-| `MAX_CACHE_SIZE`           | Maximum cache size (e.g., `10GB`, `500MB`, `1TB`). When exceeded, least-recently-used blobs are pruned.        | (no limit)    |
-| `REQUEST_TIMEOUT`          | Upstream request timeout in milliseconds                                                                       | `30000` (30s) |
-| `MAX_REDIRECTS`            | Maximum number of redirects to follow                                                                          | `5`           |
-| `USER_SERVER_LIST_TIMEOUT` | Timeout for looking up user server lists from Nostr relays (BUD-03) in milliseconds                            | `20000` (20s) |
-| `LOOKUP_RELAYS`            | Comma-separated list of Nostr relay URLs for author server lookup (BUD-03)                                     | (empty)       |
-| `FALLBACK_SERVERS`         | Comma-separated list of Blossom server URLs to try as last resort (must include protocol: http:// or https://) | (empty)       |
+| Variable                   | Description                                                                                                                 | Default                                             |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `PORT`                     | Server port number                                                                                                          | `24242`                                             |
+| `CACHE_DIR`                | Cache directory path where blobs are stored                                                                                 | `./cache`                                           |
+| `MAX_CACHE_SIZE`           | Maximum cache size (e.g., `10GB`, `500MB`, `1TB`). When exceeded, least-recently-used blobs are pruned.                     | (no limit)                                          |
+| `REQUEST_TIMEOUT`          | Upstream request timeout in milliseconds                                                                                    | `30000` (30s)                                       |
+| `MAX_REDIRECTS`            | Maximum number of redirects to follow                                                                                       | `5`                                                 |
+| `USER_SERVER_LIST_TIMEOUT` | Timeout for looking up user server lists from Nostr relays (BUD-03) in milliseconds                                         | `20000` (20s)                                       |
+| `LOOKUP_RELAYS`            | Comma-separated list of Nostr relay URLs for author server lookup (BUD-03)                                                  | (empty)                                             |
+| `FALLBACK_SERVERS`         | Comma-separated list of Blossom server URLs to try as last resort (must include protocol: http:// or https://)              | (empty)                                             |
+| `ALLOWED_UPLOAD_IPS`       | Comma-separated list of allowed IP addresses and CIDR ranges for upload/delete endpoints (e.g., `192.168.0.0/24,127.0.0.1`) | `127.0.0.0/8,::1,::ffff:127.0.0.1` (localhost only) |
 
 ### Using Multiple Environment Variables
 
@@ -205,6 +220,7 @@ MAX_CACHE_SIZE=10GB
 REQUEST_TIMEOUT=60000
 LOOKUP_RELAYS=wss://relay1.example.com,wss://relay2.example.com
 FALLBACK_SERVERS=https://blossom.primal.net,https://cdn.example.com
+ALLOWED_UPLOAD_IPS=192.168.0.0/24,127.0.0.1
 ```
 
 ## Using from Web Apps

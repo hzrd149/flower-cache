@@ -2,7 +2,7 @@
 
 import { createErrorResponse } from "./response";
 import { deleteBlobFromCache } from "./cache";
-import { validateLocalhost } from "./security";
+import { validateAllowedIP } from "./security";
 
 /**
  * Handle DELETE /<sha256> request
@@ -16,11 +16,9 @@ export async function handleDeleteRequest(
   sha256: string,
   server: { requestIP: (req: Request) => { address: string } | null },
 ): Promise<Response> {
-  // Validate localhost
-  const localhostError = validateLocalhost(req, server);
-  if (localhostError) {
-    return localhostError;
-  }
+  // Validate allowed IP
+  const ipError = validateAllowedIP(req, server);
+  if (ipError) return ipError;
 
   // Validate SHA-256 format (64 hex characters)
   if (!/^[a-f0-9]{64}$/i.test(sha256)) {

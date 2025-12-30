@@ -7,9 +7,8 @@ services:
     ports:
       - "24242:24242"
     volumes:
-      - ./cache:/app/cache
+      - ./cache:/cache
     environment:
-      - CACHE_DIR=${CACHE_DIR:-./cache}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-30000}
       - MAX_REDIRECTS=${MAX_REDIRECTS:-5}
       - USER_SERVER_LIST_TIMEOUT=${USER_SERVER_LIST_TIMEOUT:-20000}

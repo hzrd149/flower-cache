@@ -64,3 +64,10 @@ function parseSize(sizeStr: string): number | null {
 export const MAX_CACHE_SIZE: number | null = Bun.env.MAX_CACHE_SIZE
   ? parseSize(Bun.env.MAX_CACHE_SIZE)
   : null;
+
+/** Allowed IP addresses and CIDR ranges for upload/delete endpoints */
+export const ALLOWED_UPLOAD_IPS: string[] = Bun.env.ALLOWED_UPLOAD_IPS
+  ? Bun.env.ALLOWED_UPLOAD_IPS.split(",")
+      .map((ip) => ip.trim())
+      .filter((ip) => ip.length > 0)
+  : ["127.0.0.0/8", "::1", "::ffff:127.0.0.1"];

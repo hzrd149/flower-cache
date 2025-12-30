@@ -1,13 +1,17 @@
 // Upload handler for BUD-02 PUT /upload endpoint
 
-import { ensureCacheDir, writeCacheWithMetadata, getUploadTimestampFromDb } from "./cache";
+import {
+  ensureCacheDir,
+  writeCacheWithMetadata,
+  getUploadTimestampFromDb,
+} from "./cache";
 import {
   createErrorResponse,
   getMimeTypeFromHeader,
   normalizeExtensionFromMimeType,
   createBlobDescriptor,
 } from "./response";
-import { validateLocalhost } from "./security";
+import { validateAllowedIP } from "./security";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -23,11 +27,9 @@ export async function handleUploadRequest(
   req: Request,
   server: { requestIP: (req: Request) => { address: string } | null },
 ): Promise<Response> {
-  // Validate localhost
-  const localhostError = validateLocalhost(req, server);
-  if (localhostError) {
-    return localhostError;
-  }
+  // Validate allowed IP
+  const ipError = validateAllowedIP(req, server);
+  if (ipError) return ipError;
 
   // Ensure cache directory exists
   await ensureCacheDir();
@@ -165,4 +167,3 @@ async function getUploadTimestamp(sha256: string): Promise<number> {
     return Math.floor(Date.now() / 1000);
   }
 }
-
