@@ -1,11 +1,12 @@
 {
   "name": "flower-cache",
-  "module": "index.ts",
+  "version": "0.1.0",
   "type": "module",
   "private": true,
   "license": "MIT",
   "author": "hzrd149",
   "main": "index.ts",
+  "module": "index.ts",
   "bin": "index.ts",
   "scripts": {
     "start": "bun run index.ts",
