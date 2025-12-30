@@ -111,9 +111,31 @@ function initDatabase(): Database {
     CREATE TABLE IF NOT EXISTS cache_metadata (
       sha256 TEXT PRIMARY KEY,
       last_accessed INTEGER NOT NULL,
-      size INTEGER NOT NULL
+      size INTEGER NOT NULL,
+      uploaded INTEGER
     );
   `);
+
+  // Migrate existing databases: add uploaded column if it doesn't exist
+  try {
+    const tableInfo = db.query("PRAGMA table_info(cache_metadata)").all();
+    const hasUploadedColumn = tableInfo.some(
+      (row: any) => row.name === "uploaded",
+    );
+    if (!hasUploadedColumn) {
+      console.log("Migrating cache metadata: adding uploaded column...");
+      db.exec("ALTER TABLE cache_metadata ADD COLUMN uploaded INTEGER");
+      // Set uploaded timestamp for existing rows to current time as fallback
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      db.exec(
+        `UPDATE cache_metadata SET uploaded = ${currentTimestamp} WHERE uploaded IS NULL`,
+      );
+      console.log("Migration complete: added uploaded column");
+    }
+  } catch (error) {
+    // Migration might fail if column already exists, ignore
+    console.warn("Migration check failed (this is usually safe to ignore):", error);
+  }
 
   // Create index for efficient LRU queries
   db.exec(`
@@ -156,11 +178,13 @@ async function rebuildDatabase(): Promise<void> {
         const stats = await stat(filePath);
         const lastAccessed = stats.mtimeMs; // Use mtime as fallback
 
+        // Use mtime as fallback for uploaded timestamp
+        const uploadedTimestamp = Math.floor(stats.mtimeMs / 1000);
         const stmt = database.prepare(
-          `INSERT OR REPLACE INTO cache_metadata (sha256, last_accessed, size)
-           VALUES (?, ?, ?)`,
+          `INSERT OR REPLACE INTO cache_metadata (sha256, last_accessed, size, uploaded)
+           VALUES (?, ?, ?, ?)`,
         );
-        stmt.run(sha256, lastAccessed, stats.size);
+        stmt.run(sha256, lastAccessed, stats.size, uploadedTimestamp);
         rebuilt++;
       } catch (error) {
         // Skip files that can't be accessed
@@ -234,12 +258,19 @@ export async function updateAccessTime(
       }
     }
 
-    // Upsert access time and size
-    const stmt = database.prepare(
-      `INSERT OR REPLACE INTO cache_metadata (sha256, last_accessed, size)
-       VALUES (?, ?, ?)`,
+    // Get existing uploaded timestamp to preserve it
+    const existingStmt = database.prepare<{ uploaded: number | null }, [string]>(
+      "SELECT uploaded FROM cache_metadata WHERE sha256 = ?",
     );
-    stmt.run(sha256, now, size);
+    const existing = existingStmt.get(sha256);
+    const uploadedTimestamp = existing?.uploaded ?? null;
+
+    // Upsert access time and size, preserving uploaded timestamp
+    const stmt = database.prepare(
+      `INSERT OR REPLACE INTO cache_metadata (sha256, last_accessed, size, uploaded)
+       VALUES (?, ?, ?, ?)`,
+    );
+    stmt.run(sha256, now, size, uploadedTimestamp);
   } catch (error) {
     // Don't fail the request if metadata update fails
     console.warn(`Failed to update access time for ${sha256}:`, error);
@@ -408,4 +439,90 @@ export async function writeCache(
   pruneCacheIfNeeded().catch((error) => {
     console.warn("Pruning check failed:", error);
   });
+}
+
+/**
+ * Write a blob to cache with metadata (size and upload timestamp)
+ * Used for uploads to track when blobs were uploaded
+ */
+export async function writeCacheWithMetadata(
+  sha256: string,
+  size: number,
+  uploadedTimestamp: number,
+): Promise<void> {
+  try {
+    const database = await ensureDatabase();
+    const now = Date.now();
+
+    const stmt = database.prepare(
+      `INSERT OR REPLACE INTO cache_metadata (sha256, last_accessed, size, uploaded)
+       VALUES (?, ?, ?, ?)`,
+    );
+    stmt.run(sha256, now, size, uploadedTimestamp);
+
+    // Trigger pruning check (don't await to avoid blocking)
+    pruneCacheIfNeeded().catch((error) => {
+      console.warn("Pruning check failed:", error);
+    });
+  } catch (error) {
+    console.warn(`Failed to write cache metadata for ${sha256}:`, error);
+  }
+}
+
+/**
+ * Get upload timestamp from database for a blob
+ * @param sha256 - The SHA256 hash of the blob
+ * @returns Upload timestamp (Unix timestamp in seconds) or null if not found
+ */
+export async function getUploadTimestampFromDb(
+  sha256: string,
+): Promise<number | null> {
+  try {
+    const database = await ensureDatabase();
+    const stmt = database.prepare<{ uploaded: number | null }, [string]>(
+      "SELECT uploaded FROM cache_metadata WHERE sha256 = ?",
+    );
+    const result = stmt.get(sha256);
+    return result?.uploaded ?? null;
+  } catch (error) {
+    console.warn(`Failed to get upload timestamp for ${sha256}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Delete a blob from cache (file and database entry)
+ * @param sha256 - The SHA256 hash of the blob to delete
+ * @returns true if blob was deleted, false if not found
+ */
+export async function deleteBlobFromCache(sha256: string): Promise<boolean> {
+  const cachePath = getCachePath(sha256);
+  let fileDeleted = false;
+  let dbDeleted = false;
+
+  try {
+    // Delete file from disk
+    const file = Bun.file(cachePath);
+    const exists = await file.exists();
+    if (exists) {
+      await file.delete();
+      fileDeleted = true;
+    }
+  } catch (error) {
+    console.warn(`Failed to delete file ${sha256}:`, error);
+  }
+
+  try {
+    // Delete from database
+    const database = await ensureDatabase();
+    const deleteStmt = database.prepare(
+      "DELETE FROM cache_metadata WHERE sha256 = ?",
+    );
+    const result = deleteStmt.run(sha256);
+    dbDeleted = result.changes > 0;
+  } catch (error) {
+    console.warn(`Failed to delete metadata for ${sha256}:`, error);
+  }
+
+  return fileDeleted || dbDeleted;
 }

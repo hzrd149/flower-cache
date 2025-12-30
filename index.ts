@@ -1,16 +1,16 @@
-// Blossom Proxy Server
-// Implements BUD-01 and BUD-10 URL schemas for blob proxying and caching
-
+#!/usr/bin/env bun
 import { PORT, CACHE_DIR } from "./src/config";
 import { parseRequest } from "./src/parser";
 import { handleBlobRequest } from "./src/handler";
+import { handleUploadRequest } from "./src/upload";
+import { handleDeleteRequest } from "./src/delete";
 import { createErrorResponse } from "./src/response";
 import { initializeCache } from "./src/cache";
 
 // Main server
 const server = Bun.serve({
   port: PORT,
-  async fetch(req) {
+  async fetch(req): Promise<Response> {
     const url = new URL(req.url);
 
     // Handle OPTIONS requests for CORS preflight
@@ -24,6 +24,43 @@ const server = Bun.serve({
           "Access-Control-Max-Age": "86400",
         },
       });
+    }
+
+    // Handle PUT /upload requests (BUD-02)
+    if (req.method === "PUT" && url.pathname === "/upload") {
+      try {
+        return await handleUploadRequest(req, server);
+      } catch (error) {
+        console.error("Error handling upload request:", error);
+        return createErrorResponse(
+          500,
+          `Internal server error: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
+      }
+    }
+
+    // Handle DELETE /<sha256> requests (BUD-02)
+    if (req.method === "DELETE") {
+      // Extract SHA-256 from pathname (remove leading slash)
+      const pathname = url.pathname.slice(1);
+      const sha256Match = pathname.match(/^([a-f0-9]{64})$/i);
+
+      if (!sha256Match) {
+        return createErrorResponse(
+          400,
+          "Invalid request: expected DELETE /<sha256> format",
+        );
+      }
+
+      try {
+        return await handleDeleteRequest(req, sha256Match[1]!, server);
+      } catch (error) {
+        console.error("Error handling delete request:", error);
+        return createErrorResponse(
+          500,
+          `Internal server error: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
+      }
     }
 
     // Handle GET and HEAD requests

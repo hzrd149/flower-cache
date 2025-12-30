@@ -5,7 +5,7 @@ services:
     build: .
     container_name: flower-cache
     ports:
-      - "3000:3000"
+      - "24242:24242"
     volumes:
       - ./cache:/app/cache
     environment:

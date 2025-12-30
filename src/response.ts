@@ -1,6 +1,7 @@
 // Response handling utilities
 
 import mime from "mime";
+import { PORT } from "./config";
 
 /**
  * Get content type from file extension
@@ -12,6 +13,38 @@ export function getContentType(extension?: string): string {
 
   const lowerExt = extension.toLowerCase();
   return mime.getType(extension) || "application/octet-stream";
+}
+
+/**
+ * Get MIME type from Content-Type header
+ * @param contentTypeHeader - The Content-Type header value
+ * @returns MIME type string, defaults to "application/octet-stream"
+ */
+export function getMimeTypeFromHeader(
+  contentTypeHeader: string | null,
+): string {
+  if (!contentTypeHeader) {
+    return "application/octet-stream";
+  }
+
+  // Content-Type header may include charset or other parameters
+  // e.g., "text/plain; charset=utf-8" -> "text/plain"
+  const mimeType = contentTypeHeader.split(";")[0]?.trim();
+  return mimeType || "application/octet-stream";
+}
+
+/**
+ * Normalize file extension based on MIME type
+ * @param mimeType - The MIME type (e.g., "application/pdf")
+ * @returns File extension with leading dot (e.g., ".pdf") or empty string if unknown
+ */
+export function normalizeExtensionFromMimeType(mimeType: string): string {
+  if (!mimeType || mimeType === "application/octet-stream") {
+    return "";
+  }
+
+  const extension = mime.getExtension(mimeType);
+  return extension ? `.${extension}` : "";
 }
 
 /**
@@ -84,5 +117,46 @@ export function addCorsHeaders(response: Response): Response {
 export function createErrorResponse(status: number, reason: string): Response {
   const response = new Response(reason, { status });
   response.headers.set("X-Reason", reason);
+  return addCorsHeaders(response);
+}
+
+/**
+ * Create BUD-02 blob descriptor JSON response
+ * @param sha256 - The SHA-256 hash of the blob
+ * @param size - The size of the blob in bytes
+ * @param mimeType - The MIME type of the blob
+ * @param uploadedTimestamp - Unix timestamp when blob was uploaded
+ * @param extension - Optional file extension (with leading dot)
+ * @param serverUrl - Optional server URL (defaults to localhost with PORT from config)
+ * @returns Response with blob descriptor JSON
+ */
+export function createBlobDescriptor(
+  sha256: string,
+  size: number,
+  mimeType: string,
+  uploadedTimestamp: number,
+  extension: string = "",
+  serverUrl?: string,
+): Response {
+  // Build URL with extension
+  const path = `/${sha256}${extension}`;
+  const baseUrl = serverUrl || `http://localhost:${PORT}`;
+  const url = `${baseUrl}${path}`;
+
+  const descriptor = {
+    url,
+    sha256,
+    size,
+    type: mimeType,
+    uploaded: uploadedTimestamp,
+  };
+
+  const response = new Response(JSON.stringify(descriptor, null, 2), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
   return addCorsHeaders(response);
 }

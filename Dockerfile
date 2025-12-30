@@ -11,8 +11,8 @@ RUN bun install --frozen-lockfile
 # Copy source code
 COPY . .
 
-# Expose port (default 3000, can be overridden via PORT env var)
-EXPOSE 3000
+# Expose port (default 24242, can be overridden via PORT env var)
+EXPOSE 24242
 
 # Run the server
 CMD ["bun", "run", "index.ts"]

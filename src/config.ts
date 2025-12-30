@@ -6,7 +6,7 @@ import { relaySet } from "applesauce-core/helpers";
 export const CACHE_DIR = Bun.env.CACHE_DIR || "./cache";
 
 /** Server port */
-export const PORT = Bun.env.PORT ? parseInt(Bun.env.PORT, 10) : 3000;
+export const PORT = Bun.env.PORT ? parseInt(Bun.env.PORT, 10) : 24242;
 
 /** Upstream request timeout in milliseconds */
 export const REQUEST_TIMEOUT = Bun.env.REQUEST_TIMEOUT

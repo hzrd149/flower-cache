@@ -34,7 +34,7 @@ Start the server:
 bun run index.ts
 ```
 
-The server will start on port 3000 (configurable via `PORT` environment variable).
+The server will start on port 24242 (configurable via `PORT` environment variable).
 
 ### Running with Docker
 
@@ -52,7 +52,7 @@ The cache directory (`./cache`) will be persisted as a volume. You can customize
 FALLBACK_SERVERS="https://blossom.primal.net" docker-compose up -d
 ```
 
-**Note:** The default port mapping is `3000:3000`. To use a different port, either modify the `ports` section in `docker-compose.yml` or use `docker run` directly (see below).
+**Note:** The default port mapping is `24242:24242`. To use a different port, either modify the `ports` section in `docker-compose.yml` or use `docker run` directly (see below).
 
 #### Using Docker directly
 
@@ -67,7 +67,7 @@ Run the container:
 ```bash
 docker run -d \
   --name flower-cache \
-  -p 3000:3000 \
+  -p 24242:24242 \
   -v $(pwd)/cache:/app/cache \
   -e FALLBACK_SERVERS="https://blossom.primal.net" \
   flower-cache
@@ -92,13 +92,13 @@ Retrieve a blob by its SHA-256 hash.
 
 ```bash
 # Basic request
-curl http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf
+curl http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf
 
 # With server hints
-curl "http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com&sx=blossom.primal.net"
+curl "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com&sx=blossom.primal.net"
 
 # With author pubkey
-curl "http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
+curl "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
 ```
 
 ### HEAD /<sha256>[.ext][?as=<pubkey>&sx=<server>]
@@ -108,7 +108,7 @@ Check if a blob exists without downloading it.
 **Example:**
 
 ```bash
-curl -I http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf
+curl -I http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf
 ```
 
 ### OPTIONS /\*
@@ -164,10 +164,10 @@ Supports HTTP range requests for efficient partial content delivery:
 
 ```bash
 # Request bytes 0-1023
-curl -H "Range: bytes=0-1023" http://localhost:3000/<sha256>.mp4
+curl -H "Range: bytes=0-1023" http://localhost:24242/<sha256>.mp4
 
 # Request from byte 1024 to end
-curl -H "Range: bytes=1024-" http://localhost:3000/<sha256>.mp4
+curl -H "Range: bytes=1024-" http://localhost:24242/<sha256>.mp4
 ```
 
 ## Configuration
@@ -178,7 +178,7 @@ All configuration can be done via environment variables. You can also edit `src/
 
 | Variable                   | Description                                                                                                    | Default       |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------- |
-| `PORT`                     | Server port number                                                                                             | `3000`        |
+| `PORT`                     | Server port number                                                                                             | `24242`       |
 | `CACHE_DIR`                | Cache directory path where blobs are stored                                                                    | `./cache`     |
 | `MAX_CACHE_SIZE`           | Maximum cache size (e.g., `10GB`, `500MB`, `1TB`). When exceeded, least-recently-used blobs are pruned.        | (no limit)    |
 | `REQUEST_TIMEOUT`          | Upstream request timeout in milliseconds                                                                       | `30000` (30s) |
@@ -217,7 +217,7 @@ Convert BUD-01 URLs to use the proxy by extracting the server domain and adding 
 
 ```javascript
 // Transform BUD-01 URL to proxy URL
-function transformBud01Url(originalUrl, proxyBase = "http://localhost:3000") {
+function transformBud01Url(originalUrl, proxyBase = "http://localhost:24242") {
   const url = new URL(originalUrl);
   const pathParts = url.pathname.split("/").filter(Boolean);
   const sha256WithExt = pathParts[pathParts.length - 1]; // e.g., "abc123...def.pdf"
@@ -236,7 +236,7 @@ function transformBud01Url(originalUrl, proxyBase = "http://localhost:3000") {
 const originalUrl =
   "https://cdn.example.com/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf";
 const proxyUrl = transformBud01Url(originalUrl);
-// Result: "http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com"
+// Result: "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com"
 ```
 
 ### Transforming BUD-10 URIs
@@ -245,7 +245,7 @@ Convert BUD-10 URIs (with `blossom:` scheme) to proxy URLs, preserving server hi
 
 ```javascript
 // Transform BUD-10 URI to proxy URL
-function transformBud10Uri(blossomUri, proxyBase = "http://localhost:3000") {
+function transformBud10Uri(blossomUri, proxyBase = "http://localhost:24242") {
   // Remove "blossom:" prefix and parse
   const uri = blossomUri.replace(/^blossom:/, "");
   const [pathPart, queryPart] = uri.split("?");
@@ -276,7 +276,7 @@ function transformBud10Uri(blossomUri, proxyBase = "http://localhost:3000") {
 const blossomUri =
   "blossom:b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?xs=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0";
 const proxyUrl = transformBud10Uri(blossomUri);
-// Result: "http://localhost:3000/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
+// Result: "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
 ```
 
 ## BUD-01 & BUD-10 Compliance
