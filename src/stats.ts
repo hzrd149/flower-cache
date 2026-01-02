@@ -96,4 +96,3 @@ export async function generateStatsPage(): Promise<string> {
 </body>
 </html>`;
 }
-
