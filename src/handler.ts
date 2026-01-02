@@ -56,7 +56,6 @@ export async function handleBlobRequest(
   // Check cache first
   const cachedFile = await checkCache(sha256);
   if (cachedFile) {
-    console.log(`[${sha256}] ✓ Found in cache`);
     return handleCachedFile(
       req,
       cachedFile,
@@ -90,16 +89,14 @@ export async function handleBlobRequest(
         );
       } else {
         console.log(
-          `[${sha256}] Resolving ${authorPubkeys.length} as hint(s):`,
-          authorPubkeys,
+          `[${sha256}] Resolving ${authorPubkeys.length} as hint(s): ${authorPubkeys.join(", ")}`,
         );
         for (const pubkey of authorPubkeys) {
           console.log(`[${sha256}] Resolving servers for as hint: ${pubkey}`);
           const authorServers = await resolveAuthorServers(pubkey);
           if (authorServers.length > 0) {
             console.log(
-              `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}:`,
-              authorServers,
+              `[${sha256}] Found ${authorServers.length} server(s) for ${pubkey}: ${authorServers.join(", ")}`,
             );
           } else {
             console.log(`[${sha256}] No servers found for ${pubkey}`);
@@ -116,11 +113,12 @@ export async function handleBlobRequest(
     if (servers.length > 0) {
       if (servers.length < allServers.length) {
         console.log(
-          `[${sha256}] Deduplicated ${allServers.length} server(s) to ${servers.length}:`,
-          servers,
+          `[${sha256}] Deduplicated ${allServers.length} server(s) to ${servers.length}: ${servers.join(", ")}`,
         );
       } else {
-        console.log(`[${sha256}] Trying ${servers.length} server(s):`, servers);
+        console.log(
+          `[${sha256}] Trying ${servers.length} server(s): ${servers.join(", ")}`,
+        );
       }
     } else {
       console.log(`[${sha256}] No servers to try`);
@@ -157,8 +155,7 @@ export async function handleBlobRequest(
     // If still not found, try fallback servers
     if (!upstreamStream && FALLBACK_SERVERS.length > 0) {
       console.log(
-        `[${sha256}] Trying ${FALLBACK_SERVERS.length} fallback server(s):`,
-        FALLBACK_SERVERS.map((url) => url.href),
+        `[${sha256}] Trying ${FALLBACK_SERVERS.length} fallback server(s): ${FALLBACK_SERVERS.map((url) => url.href).join(", ")}`,
       );
 
       for (const fallbackServer of FALLBACK_SERVERS) {
@@ -223,7 +220,11 @@ export async function handleBlobRequest(
     return createErrorResponse(404, "Blob not found");
   }
 
-  const responseStream = fetchResult.stream;
+  // Tee the stream to create a new branch for this request
+  // This allows multiple concurrent requests to read from the same upstream fetch
+  // without locking conflicts. Each request gets its own branch.
+  const [requestStream, hashConsumptionStream] = fetchResult.stream.tee();
+
   const contentType = fetchResult.contentType;
   const contentLength = fetchResult.contentLength;
   const hashValidation = fetchResult.hashValidation;
@@ -247,16 +248,20 @@ export async function handleBlobRequest(
       console.error(`[${sha256}] Hash validation error:`, error);
     });
 
-  // For HEAD requests, consume the stream to calculate hash but don't send body
+  // For HEAD requests, consume the stream to ensure hash calculation completes
+  // The hash is calculated via the cache write branch, but we consume this branch
+  // to ensure data flows through the hash stream
   if (isHead) {
-    // Consume stream in background for hash calculation and caching
+    // Consume stream in background for hash calculation
     // Pipe to a null consumer to ensure all data is processed
     const nullWriter = new WritableStream({
       write() {
         // Discard all data
       },
     });
-    responseStream.pipeTo(nullWriter).catch(() => {
+    // Consume the hashConsumptionStream to ensure data flows through hash stream
+    // The cache write branch also consumes data, but this ensures we don't block
+    hashConsumptionStream.pipeTo(nullWriter).catch(() => {
       // Ignore errors
     });
 
@@ -285,7 +290,7 @@ export async function handleBlobRequest(
       if (contentLength === null) {
         // If we don't know the size, fall back to streaming the full response
         return addCorsHeaders(
-          new Response(responseStream, {
+          new Response(requestStream, {
             status: 200,
             headers: {
               "Content-Type": contentType,
@@ -309,6 +314,20 @@ export async function handleBlobRequest(
         return createErrorResponse(416, "Range not satisfiable");
       }
 
+      // Consume hashConsumptionStream to ensure data flows through hash stream
+      // This is needed because we're only reading a portion of requestStream for the range
+      hashConsumptionStream
+        .pipeTo(
+          new WritableStream({
+            write() {
+              // Discard data, we just need to consume it to ensure data flows
+            },
+          }),
+        )
+        .catch(() => {
+          // Ignore errors
+        });
+
       // Create a transform stream that handles range requests
       const rangeStream = new ReadableStream({
         start(controller) {
@@ -316,7 +335,7 @@ export async function handleBlobRequest(
           let bytesSent = 0;
           const rangeLength = endByte - start + 1;
 
-          const reader = responseStream.getReader();
+          const reader = requestStream.getReader();
 
           const pump = async () => {
             try {
@@ -389,8 +408,23 @@ export async function handleBlobRequest(
   }
 
   // Return full stream for GET requests
+  // Hash validation is already happening via the cache write branch in createHashAndCacheStream
+  // We consume the hashConsumptionStream to ensure data flows, but it's not strictly necessary
+  // since the cache write branch is already consuming data
+  hashConsumptionStream
+    .pipeTo(
+      new WritableStream({
+        write() {
+          // Discard data, we just need to consume it to ensure data flows
+        },
+      }),
+    )
+    .catch(() => {
+      // Ignore errors
+    });
+
   return addCorsHeaders(
-    new Response(responseStream, {
+    new Response(requestStream, {
       status: 200,
       headers: {
         "Content-Type": contentType,

@@ -46,6 +46,16 @@ const server = Bun.serve({
       }
     }
 
+    // Handle HEAD / requests - health check
+    if (req.method === "HEAD" && url.pathname === "/") {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+        },
+      });
+    }
+
     // Handle PUT /upload requests (BUD-02)
     if (req.method === "PUT" && url.pathname === "/upload") {
       try {
