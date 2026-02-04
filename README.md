@@ -1,6 +1,6 @@
 # flower-cache
 
-A high-performance Blossom proxy server that caches blobs locally and proxies requests to upstream Blossom servers. Implements [BUD-01](https://github.com/nostr-protocol/nips/blob/master/83.md) and [BUD-10](https://github.com/nostr-protocol/nips/blob/master/83.md) URL schemas for decentralized blob storage and retrieval.
+A high-performance Blossom proxy server that caches blobs locally and proxies requests to upstream Blossom servers. Implements [BUD-01](https://github.com/hzrd149/blossom/blob/master/buds/01.md) and [BUD-10](https://github.com/hzrd149/blossom/blob/master/buds/10.md) URL schemas for decentralized blob storage and retrieval.
 
 ## Features
 
