@@ -1,9 +1,8 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { CACHE_DIR } from "./config";
 import { errorDownload, formatDurationMs, logDownload } from "./download-log";
 import { fetchFromServer } from "./proxy";
-import { createHashStream } from "./hash-stream";
 import type {
   DownloadJob,
   WorkerRequestMessage,
@@ -26,13 +25,12 @@ async function writeValidatedBlobToCache(
 
   const tempPath = getTempCachePath(sha256);
   const finalPath = getCachePath(sha256);
-  const hashStream = createHashStream(sha256);
-  const hashedStream = upstreamStream.pipeThrough(hashStream);
+  const hasher = new Bun.CryptoHasher("sha256");
   const writer = Bun.file(tempPath).writer();
   let size = 0;
 
   try {
-    const reader = hashedStream.getReader();
+    const reader = upstreamStream.getReader();
 
     while (true) {
       const { done, value } = await reader.read();
@@ -40,19 +38,19 @@ async function writeValidatedBlobToCache(
         break;
       }
 
+      hasher.update(value);
       size += value.length;
       writer.write(value);
     }
 
     writer.end();
 
-    const isValid = await hashStream.validateHash();
-    if (!isValid) {
+    const digest = hasher.digest("hex").toLowerCase();
+    if (digest !== sha256.toLowerCase()) {
       throw new Error("Hash validation failed");
     }
 
-    await Bun.write(finalPath, Bun.file(tempPath));
-    await Bun.file(tempPath).delete();
+    await rename(tempPath, finalPath);
     return size;
   } catch (error) {
     try {
