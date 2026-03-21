@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { PORT, CACHE_DIR } from "./src/config";
+import { PORT, CACHE_DIR, DOWNLOAD_WORKERS } from "./src/config";
 import { parseRequest } from "./src/parser";
 import { handleBlobRequest } from "./src/handler";
 import { handleUploadRequest } from "./src/upload";
@@ -7,6 +7,13 @@ import { handleDeleteRequest } from "./src/delete";
 import { createErrorResponse } from "./src/response";
 import { initializeCache } from "./src/cache";
 import { generateStatsPage } from "./src/stats";
+import {
+  initializeDownloadWorkerPool,
+  terminateDownloadWorkerPool,
+} from "./src/worker-pool";
+
+await initializeCache();
+initializeDownloadWorkerPool(DOWNLOAD_WORKERS);
 
 // Main server
 const server = Bun.serve({
@@ -120,11 +127,9 @@ const server = Bun.serve({
   },
 });
 
-// Initialize cache system before starting server
-await initializeCache();
-
 console.log(`Blossom proxy server running at ${server.url}`);
 console.log(`Cache directory: ${CACHE_DIR}`);
+console.log(`Download workers: ${DOWNLOAD_WORKERS}`);
 
 // Graceful shutdown handler
 const shutdown = async (signal: string) => {
@@ -132,6 +137,8 @@ const shutdown = async (signal: string) => {
 
   // Stop accepting new connections
   server.stop();
+
+  await terminateDownloadWorkerPool();
 
   // Give existing requests time to complete
   // Bun's server.stop() already handles this, but we can add a small delay
