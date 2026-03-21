@@ -3,21 +3,18 @@
 import { mkdir } from "node:fs/promises";
 import { CACHE_DIR } from "./config";
 import { updateAccessTime, pruneCacheIfNeeded } from "./cache";
-
-/**
- * Get the cache file path for a given sha256 hash
- */
-function getCachePath(sha256: string): string {
-  return `${CACHE_DIR}/${sha256}`;
-}
+import { buildCachePath, normalizeCacheExtension } from "./cache-file";
 
 /**
  * Create a writable stream that writes chunks to cache file as they arrive
  * @param sha256 - The SHA256 hash of the blob being cached
  * @returns WritableStream that writes to the cache file
  */
-export function createCacheStream(sha256: string): WritableStream<Uint8Array> {
-  const cachePath = getCachePath(sha256);
+export function createCacheStream(
+  sha256: string,
+  extension?: string,
+): WritableStream<Uint8Array> {
+  const cachePath = buildCachePath(sha256, normalizeCacheExtension(extension));
   let writer: Bun.FileSink | null = null;
 
   return new WritableStream({

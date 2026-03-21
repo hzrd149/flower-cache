@@ -1,7 +1,8 @@
 // Response handling utilities
 
-import mime from "mime";
+import { lookup as lookupMimeType } from "mime-types";
 import { PORT } from "./config";
+import { getPreferredExtensionFromMimeType } from "./cache-file";
 
 /**
  * Get content type from file extension
@@ -11,8 +12,10 @@ export function getContentType(extension?: string): string {
     return "application/octet-stream";
   }
 
-  const lowerExt = extension.toLowerCase();
-  return mime.getType(extension) || "application/octet-stream";
+  const normalizedExtension = extension.startsWith(".")
+    ? extension.slice(1)
+    : extension;
+  return lookupMimeType(normalizedExtension) || "application/octet-stream";
 }
 
 /**
@@ -39,12 +42,7 @@ export function getMimeTypeFromHeader(
  * @returns File extension with leading dot (e.g., ".pdf") or empty string if unknown
  */
 export function normalizeExtensionFromMimeType(mimeType: string): string {
-  if (!mimeType || mimeType === "application/octet-stream") {
-    return "";
-  }
-
-  const extension = mime.getExtension(mimeType);
-  return extension ? `.${extension}` : "";
+  return getPreferredExtensionFromMimeType(mimeType);
 }
 
 /**

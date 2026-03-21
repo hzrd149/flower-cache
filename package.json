@@ -1,6 +1,6 @@
 {
   "name": "flower-cache",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -32,10 +32,12 @@
     "applesauce-relay": "^0.0.0-next-20251220152312",
     "ip-range-check": "^0.2.0",
     "mime": "^4.1.0",
+    "mime-types": "^3.0.2",
     "process-pastry": "https://github.com/hzrd149/process-pastry",
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@types/mime-types": "^3.0.1",
     "prettier": "^3.7.4"
   }
 }

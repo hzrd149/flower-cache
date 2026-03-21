@@ -1,7 +1,17 @@
 import { mkdir, rename } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { CACHE_DIR } from "./config";
-import { errorDownload, formatDurationMs, logDownload } from "./download-log";
+import {
+  buildCachePath,
+  getPreferredExtensionFromMimeType,
+  normalizeCacheExtension,
+} from "./cache-file";
+import {
+  errorDownload,
+  formatDurationMs,
+  logDownload,
+  warnDownload,
+} from "./download-log";
 import { fetchFromServer } from "./proxy";
 import type {
   DownloadJob,
@@ -9,22 +19,19 @@ import type {
   WorkerResponseMessage,
 } from "./worker-protocol";
 
-function getCachePath(sha256: string): string {
-  return `${CACHE_DIR}/${sha256}`;
-}
-
 function getTempCachePath(sha256: string): string {
   return `${CACHE_DIR}/.${sha256}.${randomUUID()}.part`;
 }
 
 async function writeValidatedBlobToCache(
   sha256: string,
+  extension: string,
   upstreamStream: ReadableStream<Uint8Array>,
 ): Promise<number> {
   await mkdir(CACHE_DIR, { recursive: true });
 
   const tempPath = getTempCachePath(sha256);
-  const finalPath = getCachePath(sha256);
+  const finalPath = buildCachePath(sha256, extension);
   const hasher = new Bun.CryptoHasher("sha256");
   const writer = Bun.file(tempPath).writer();
   let size = 0;
@@ -71,27 +78,56 @@ async function writeValidatedBlobToCache(
 
 async function runDownload(job: DownloadJob): Promise<WorkerResponseMessage> {
   const startedAt = performance.now();
+  let sawInvalidBlob = false;
 
   for (const server of job.servers) {
-    const response = await fetchFromServer(server, job.sha256, job.extension);
+    try {
+      const response = await fetchFromServer(server, job.sha256, job.extension);
 
-    if (!response || !response.ok || !response.body) {
-      continue;
+      if (!response || !response.ok || !response.body) {
+        continue;
+      }
+
+      const extension = response.headers.get("Content-Type")
+        ? getPreferredExtensionFromMimeType(
+            response.headers.get("Content-Type"),
+          )
+        : normalizeCacheExtension(job.extension);
+
+      const size = await writeValidatedBlobToCache(
+        job.sha256,
+        extension,
+        response.body,
+      );
+      logDownload(
+        job.sha256,
+        `verify ok ${size} bytes ${formatDurationMs(startedAt)}`,
+      );
+      return {
+        type: "download:complete",
+        jobId: job.jobId,
+        sha256: job.sha256,
+        size,
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown worker error";
+      if (message === "Hash validation failed") {
+        sawInvalidBlob = true;
+        warnDownload(job.sha256, `verify skipped invalid blob from ${server}`);
+        continue;
+      }
+
+      throw error;
     }
-
-    const size = await writeValidatedBlobToCache(job.sha256, response.body);
-    logDownload(
-      job.sha256,
-      `verify ok ${size} bytes ${formatDurationMs(startedAt)}`,
-    );
-    return {
-      type: "download:complete",
-      jobId: job.jobId,
-      sha256: job.sha256,
-      size,
-    };
   }
 
+  if (sawInvalidBlob) {
+    warnDownload(
+      job.sha256,
+      "verify miss after invalid upstream blob responses",
+    );
+  }
   logDownload(job.sha256, `verify miss ${formatDurationMs(startedAt)}`);
   return {
     type: "download:notFound",

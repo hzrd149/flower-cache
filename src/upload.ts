@@ -2,15 +2,18 @@
 
 import {
   ensureCacheDir,
+  findCacheEntry,
   writeCacheWithMetadata,
   getUploadTimestampFromDb,
 } from "./cache";
 import {
   createErrorResponse,
   getMimeTypeFromHeader,
+  getContentType,
   normalizeExtensionFromMimeType,
   createBlobDescriptor,
 } from "./response";
+import { buildCachePath, normalizeCacheExtension } from "./cache-file";
 import { validateAllowedIP } from "./security";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
@@ -37,6 +40,9 @@ export async function handleUploadRequest(
   // Get MIME type from Content-Type header
   const contentType = req.headers.get("Content-Type");
   const mimeType = getMimeTypeFromHeader(contentType);
+  const normalizedExt = normalizeCacheExtension(
+    normalizeExtensionFromMimeType(mimeType),
+  );
 
   // Get content length if available
   const contentLengthHeader = req.headers.get("Content-Length");
@@ -87,36 +93,33 @@ export async function handleUploadRequest(
       const finalSize = stats.size;
 
       // Check if blob with this hash already exists
-      const finalCachePath = join(CACHE_DIR, computedHash);
-      const existingFile = Bun.file(finalCachePath);
-      const exists = await existingFile.exists();
+      const existingEntry = await findCacheEntry(computedHash);
 
-      if (exists) {
+      if (existingEntry) {
         // Blob already exists, delete temp file
         await unlink(tempPath);
         console.log(`[${computedHash}] Upload skipped: blob already exists`);
 
         // Get existing file stats for descriptor
+        const existingFile = Bun.file(existingEntry.filePath);
         const existingStats = await existingFile.stat();
         const existingSize = existingStats.size;
 
         // Get upload timestamp from metadata (or use current time as fallback)
         const uploadedTimestamp = await getUploadTimestamp(computedHash);
 
-        // Normalize extension based on MIME type
-        const normalizedExt = normalizeExtensionFromMimeType(mimeType);
-
         // Return descriptor for existing blob
         return createBlobDescriptor(
           computedHash,
           existingSize,
-          mimeType,
+          getContentType(existingEntry.extension),
           uploadedTimestamp,
-          normalizedExt,
+          existingEntry.extension,
         );
       }
 
       // Move temp file to final location
+      const finalCachePath = buildCachePath(computedHash, normalizedExt);
       await Bun.write(finalCachePath, tempFile);
       await unlink(tempPath).catch(() => {
         // Ignore if temp file already deleted
@@ -124,12 +127,14 @@ export async function handleUploadRequest(
 
       // Update cache metadata with upload timestamp
       const uploadedTimestamp = Math.floor(Date.now() / 1000);
-      await writeCacheWithMetadata(computedHash, finalSize, uploadedTimestamp);
+      await writeCacheWithMetadata(
+        computedHash,
+        finalSize,
+        uploadedTimestamp,
+        normalizedExt,
+      );
 
       console.log(`[${computedHash}] ✓ Upload completed: ${finalSize} bytes`);
-
-      // Normalize extension based on MIME type
-      const normalizedExt = normalizeExtensionFromMimeType(mimeType);
 
       // Return blob descriptor
       return createBlobDescriptor(
