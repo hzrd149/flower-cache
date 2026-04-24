@@ -1,10 +1,31 @@
 // Cache management functions
 
-import { mkdir } from "node:fs/promises";
-import { readdir, stat } from "node:fs/promises";
 import { Database } from "bun:sqlite";
-import { CACHE_DIR, MAX_CACHE_SIZE } from "./config";
+import { unlink, mkdir, readdir, rename, stat } from "node:fs/promises";
+import { join } from "node:path";
 import type { BunFile } from "bun";
+import {
+  buildCacheFilename,
+  buildCachePath,
+  inferExtensionFromFile,
+  normalizeCacheExtension,
+  parseCacheFilename,
+} from "./cache-file";
+import { CACHE_DIR, MAX_CACHE_SIZE } from "./config";
+
+interface CacheMetadataRow {
+  sha256: string;
+  size: number;
+  uploaded: number | null;
+  extension: string | null;
+}
+
+export interface CacheEntry {
+  sha256: string;
+  extension: string;
+  filename: string;
+  filePath: string;
+}
 
 /**
  * Ensure the cache directory exists
@@ -12,7 +33,7 @@ import type { BunFile } from "bun";
 export async function ensureCacheDir(): Promise<void> {
   try {
     await mkdir(CACHE_DIR, { recursive: true });
-  } catch (error) {
+  } catch {
     // Directory might already exist, ignore
   }
 }
@@ -22,26 +43,26 @@ export async function ensureCacheDir(): Promise<void> {
  * Should be called on application startup
  */
 export async function initializeCache(): Promise<void> {
-  // Ensure cache directory exists
   await ensureCacheDir();
 
-  // Check if database exists
   const dbPath = getMetadataDbPath();
-  const dbFile = Bun.file(dbPath);
-  const dbExists = await dbFile.exists();
+  const dbExists = await Bun.file(dbPath).exists();
 
   try {
-    // Initialize database
     const database = initDatabase();
 
-    // If database didn't exist, rebuild from directory scan
     if (!dbExists) {
       console.log("Cache metadata database not found, initializing...");
+    }
+
+    const migrationResult = await migrateCacheFiles();
+
+    if (!dbExists || migrationResult.changed || metadataRebuildRequired) {
       await rebuildDatabase();
+      metadataRebuildRequired = false;
     } else {
-      // Verify database is accessible and has correct schema
       try {
-        const countQuery = database.query(
+        const countQuery = database.query<{ count: number }, []>(
           "SELECT COUNT(*) as count FROM cache_metadata",
         );
         countQuery.get();
@@ -51,7 +72,6 @@ export async function initializeCache(): Promise<void> {
       }
     }
 
-    // Log cache statistics
     const cacheSize = await getCacheSize();
     const countQuery = database.query<{ count: number }, []>(
       "SELECT COUNT(*) as count FROM cache_metadata",
@@ -62,6 +82,11 @@ export async function initializeCache(): Promise<void> {
     console.log(
       `Cache initialized: ${fileCount} files, ${(cacheSize / 1024 / 1024).toFixed(2)} MB`,
     );
+    if (migrationResult.renamed > 0) {
+      console.log(
+        `Cache filename migration renamed ${migrationResult.renamed} files`,
+      );
+    }
     if (MAX_CACHE_SIZE !== null) {
       console.log(
         `Cache size limit: ${(MAX_CACHE_SIZE / 1024 / 1024).toFixed(2)} MB`,
@@ -69,16 +94,7 @@ export async function initializeCache(): Promise<void> {
     }
   } catch (error) {
     console.error("Failed to initialize cache database:", error);
-    // Don't throw - allow server to start even if metadata tracking fails
-    // Cache will still work, just without pruning
   }
-}
-
-/**
- * Get the cache file path for a given sha256 hash
- */
-function getCachePath(sha256: string): string {
-  return `${CACHE_DIR}/${sha256}`;
 }
 
 /**
@@ -88,59 +104,64 @@ function getMetadataDbPath(): string {
   return `${CACHE_DIR}/.cache-metadata.db`;
 }
 
-// Initialize SQLite database
 let db: Database | null = null;
 let dbInitialized = false;
+let metadataRebuildRequired = false;
 
-/**
- * Initialize the SQLite database for cache metadata
- */
 function initDatabase(): Database {
   if (db && dbInitialized) {
     return db;
   }
 
-  const dbPath = getMetadataDbPath();
-  db = new Database(dbPath);
-
-  // Enable WAL mode for better concurrent access
+  db = new Database(getMetadataDbPath());
   db.exec("PRAGMA journal_mode=WAL");
 
-  // Create table if it doesn't exist
   db.exec(`
     CREATE TABLE IF NOT EXISTS cache_metadata (
       sha256 TEXT PRIMARY KEY,
       last_accessed INTEGER NOT NULL,
       size INTEGER NOT NULL,
-      uploaded INTEGER
+      uploaded INTEGER,
+      extension TEXT NOT NULL DEFAULT '.bin'
     );
   `);
 
-  // Migrate existing databases: add uploaded column if it doesn't exist
   try {
-    const tableInfo = db.query("PRAGMA table_info(cache_metadata)").all();
-    const hasUploadedColumn = tableInfo.some(
-      (row: any) => row.name === "uploaded",
+    const tableInfo = db
+      .query("PRAGMA table_info(cache_metadata)")
+      .all() as Array<{
+      name: string;
+    }>;
+    const hasUploadedColumn = tableInfo.some((row) => row.name === "uploaded");
+    const hasExtensionColumn = tableInfo.some(
+      (row) => row.name === "extension",
     );
+
     if (!hasUploadedColumn) {
       console.log("Migrating cache metadata: adding uploaded column...");
       db.exec("ALTER TABLE cache_metadata ADD COLUMN uploaded INTEGER");
-      // Set uploaded timestamp for existing rows to current time as fallback
       const currentTimestamp = Math.floor(Date.now() / 1000);
       db.exec(
         `UPDATE cache_metadata SET uploaded = ${currentTimestamp} WHERE uploaded IS NULL`,
       );
-      console.log("Migration complete: added uploaded column");
+      metadataRebuildRequired = true;
+    }
+
+    if (!hasExtensionColumn) {
+      console.log("Migrating cache metadata: adding extension column...");
+      db.exec("ALTER TABLE cache_metadata ADD COLUMN extension TEXT");
+      db.exec(
+        "UPDATE cache_metadata SET extension = '.bin' WHERE extension IS NULL",
+      );
+      metadataRebuildRequired = true;
     }
   } catch (error) {
-    // Migration might fail if column already exists, ignore
     console.warn(
       "Migration check failed (this is usually safe to ignore):",
       error,
     );
   }
 
-  // Create index for efficient LRU queries
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_last_accessed
     ON cache_metadata(last_accessed);
@@ -150,47 +171,52 @@ function initDatabase(): Database {
   return db;
 }
 
-/**
- * Rebuild database from cache directory scan
- * Used when database is missing or corrupted
- */
 async function rebuildDatabase(): Promise<void> {
   console.log("Rebuilding cache metadata database from directory scan...");
   const database = initDatabase();
 
   try {
-    // Start transaction for better performance
     database.exec("BEGIN TRANSACTION");
-
-    // Clear existing data
     database.exec("DELETE FROM cache_metadata");
 
-    // Scan cache directory
     const files = await readdir(CACHE_DIR);
     let rebuilt = 0;
 
     for (const filename of files) {
-      // Skip hidden files (like .cache-metadata.db)
-      if (filename.startsWith(".")) continue;
+      if (filename.startsWith(".")) {
+        continue;
+      }
 
-      // Use filename as sha256
-      const sha256 = filename;
-      const filePath = getCachePath(sha256);
+      const parsed = parseCacheFilename(filename);
+      if (!parsed) {
+        console.warn(`Skipping unrecognized cache file ${filename}`);
+        continue;
+      }
+
+      const extension = normalizeCacheExtension(parsed.extension);
+      const filePath = join(CACHE_DIR, filename);
 
       try {
         const stats = await stat(filePath);
-        const lastAccessed = stats.mtimeMs; // Use mtime as fallback
-
-        // Use mtime as fallback for uploaded timestamp
         const uploadedTimestamp = Math.floor(stats.mtimeMs / 1000);
         const stmt = database.prepare(
-          `INSERT OR REPLACE INTO cache_metadata (sha256, last_accessed, size, uploaded)
-           VALUES (?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO cache_metadata (
+             sha256,
+             last_accessed,
+             size,
+             uploaded,
+             extension
+           ) VALUES (?, ?, ?, ?, ?)`,
         );
-        stmt.run(sha256, lastAccessed, stats.size, uploadedTimestamp);
-        rebuilt++;
+        stmt.run(
+          parsed.sha256,
+          stats.mtimeMs,
+          stats.size,
+          uploadedTimestamp,
+          extension,
+        );
+        rebuilt += 1;
       } catch (error) {
-        // Skip files that can't be accessed
         console.warn(`Skipping file ${filename} during rebuild:`, error);
       }
     }
@@ -204,22 +230,173 @@ async function rebuildDatabase(): Promise<void> {
   }
 }
 
-/**
- * Ensure database is initialized and valid
- */
 async function ensureDatabase(): Promise<Database> {
   try {
     return initDatabase();
   } catch (error) {
     console.warn("Database initialization failed, attempting rebuild:", error);
-    try {
-      await rebuildDatabase();
-      return initDatabase();
-    } catch (rebuildError) {
-      console.error("Database rebuild failed:", rebuildError);
-      throw rebuildError;
+    await rebuildDatabase();
+    return initDatabase();
+  }
+}
+
+async function persistCacheMetadata(
+  sha256: string,
+  size: number,
+  uploadedTimestamp: number | null,
+  extension: string,
+  lastAccessed = Date.now(),
+): Promise<void> {
+  const database = await ensureDatabase();
+  const stmt = database.prepare(
+    `INSERT OR REPLACE INTO cache_metadata (
+       sha256,
+       last_accessed,
+       size,
+       uploaded,
+       extension
+     ) VALUES (?, ?, ?, ?, ?)`,
+  );
+  stmt.run(
+    sha256,
+    lastAccessed,
+    size,
+    uploadedTimestamp,
+    normalizeCacheExtension(extension),
+  );
+}
+
+async function getMetadataRow(
+  sha256: string,
+): Promise<CacheMetadataRow | null> {
+  try {
+    const database = await ensureDatabase();
+    const stmt = database.prepare<CacheMetadataRow, [string]>(
+      "SELECT sha256, size, uploaded, extension FROM cache_metadata WHERE sha256 = ?",
+    );
+    return stmt.get(sha256) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function findCacheEntryOnDisk(
+  sha256: string,
+): Promise<CacheEntry | null> {
+  try {
+    const files = await readdir(CACHE_DIR);
+
+    for (const filename of files) {
+      if (filename.startsWith(".")) {
+        continue;
+      }
+
+      const parsed = parseCacheFilename(filename);
+      if (!parsed || parsed.sha256 !== sha256) {
+        continue;
+      }
+
+      const extension = normalizeCacheExtension(parsed.extension);
+      return {
+        sha256,
+        extension,
+        filename,
+        filePath: join(CACHE_DIR, filename),
+      };
+    }
+  } catch {
+    // ignore disk lookup failures
+  }
+
+  return null;
+}
+
+export async function findCacheEntry(
+  sha256: string,
+): Promise<CacheEntry | null> {
+  const normalizedSha = sha256.toLowerCase();
+  const row = await getMetadataRow(normalizedSha);
+
+  if (row) {
+    const extension = normalizeCacheExtension(row.extension);
+    const filePath = buildCachePath(normalizedSha, extension);
+    const file = Bun.file(filePath);
+    if (await file.exists()) {
+      return {
+        sha256: normalizedSha,
+        extension,
+        filename: buildCacheFilename(normalizedSha, extension),
+        filePath,
+      };
     }
   }
+
+  const diskEntry = await findCacheEntryOnDisk(normalizedSha);
+  if (!diskEntry) {
+    return null;
+  }
+
+  try {
+    const stats = await Bun.file(diskEntry.filePath).stat();
+    await persistCacheMetadata(
+      normalizedSha,
+      stats.size,
+      row?.uploaded ?? Math.floor(stats.mtimeMs / 1000),
+      diskEntry.extension,
+      Date.now(),
+    );
+  } catch {
+    // ignore metadata repair failures
+  }
+
+  return diskEntry;
+}
+
+async function migrateCacheFiles(): Promise<{
+  changed: boolean;
+  renamed: number;
+}> {
+  const files = await readdir(CACHE_DIR);
+  let renamedCount = 0;
+
+  for (const filename of files) {
+    if (filename.startsWith(".")) {
+      continue;
+    }
+
+    const parsed = parseCacheFilename(filename);
+    if (!parsed) {
+      console.warn(`Skipping unrecognized cache file ${filename}`);
+      continue;
+    }
+
+    const sourcePath = join(CACHE_DIR, filename);
+    let extension = parsed.extension;
+
+    if (!extension) {
+      extension = await inferExtensionFromFile(sourcePath);
+    }
+
+    const targetFilename = buildCacheFilename(parsed.sha256, extension);
+    if (filename === targetFilename) {
+      continue;
+    }
+
+    const targetPath = join(CACHE_DIR, targetFilename);
+    try {
+      const targetExists = await Bun.file(targetPath).exists();
+      if (targetExists) {
+        await unlink(sourcePath);
+      } else {
+        await rename(sourcePath, targetPath);
+      }
+      renamedCount += 1;
+    } catch (error) {
+      console.warn(`Failed to migrate cache file ${filename}:`, error);
+    }
+  }
+
+  return { changed: renamedCount > 0, renamed: renamedCount };
 }
 
 /**
@@ -232,51 +409,34 @@ export async function updateAccessTime(
   size?: number,
 ): Promise<void> {
   try {
-    const database = await ensureDatabase();
-    const now = Date.now();
+    const normalizedSha = sha256.toLowerCase();
+    const row = await getMetadataRow(normalizedSha);
+    const entry = await findCacheEntry(normalizedSha);
 
-    // If size not provided, try to get it from database first
-    if (size === undefined) {
-      const sizeStmt = database.prepare<{ size: number }, [string]>(
-        "SELECT size FROM cache_metadata WHERE sha256 = ?",
-      );
-      const existing = sizeStmt.get(sha256);
-      if (existing) {
-        size = existing.size;
-      } else {
-        // Not in database, get from file stats
-        try {
-          const file = Bun.file(getCachePath(sha256));
-          const exists = await file.exists();
-          if (!exists) {
-            // File doesn't exist, nothing to do (might not be in DB yet)
-            return;
-          }
-          const stats = await file.stat();
-          size = stats.size;
-        } catch {
-          // File access failed, nothing to do
-          return;
-        }
-      }
+    if (!entry) {
+      return;
     }
 
-    // Get existing uploaded timestamp to preserve it
-    const existingStmt = database.prepare<
-      { uploaded: number | null },
-      [string]
-    >("SELECT uploaded FROM cache_metadata WHERE sha256 = ?");
-    const existing = existingStmt.get(sha256);
-    const uploadedTimestamp = existing?.uploaded ?? null;
+    if (size === undefined) {
+      size = row?.size;
+    }
 
-    // Upsert access time and size, preserving uploaded timestamp
-    const stmt = database.prepare(
-      `INSERT OR REPLACE INTO cache_metadata (sha256, last_accessed, size, uploaded)
-       VALUES (?, ?, ?, ?)`,
+    if (size === undefined) {
+      size = (await Bun.file(entry.filePath).stat()).size;
+    }
+
+    if (size === undefined) {
+      return;
+    }
+
+    await persistCacheMetadata(
+      normalizedSha,
+      size,
+      row?.uploaded ?? null,
+      entry.extension,
+      Date.now(),
     );
-    stmt.run(sha256, now, size, uploadedTimestamp);
   } catch (error) {
-    // Don't fail the request if metadata update fails
     console.warn(`Failed to update access time for ${sha256}:`, error);
   }
 }
@@ -286,19 +446,17 @@ export async function updateAccessTime(
  * @returns BunFile if exists, null otherwise
  */
 export async function checkCache(sha256: string): Promise<BunFile | null> {
-  const cachePath = getCachePath(sha256);
   try {
-    const file = Bun.file(cachePath);
-    const exists = await file.exists();
-    if (exists) {
-      // Update access time asynchronously (don't await to avoid blocking)
-      // No need to call stat() - updateAccessTime will get size from database or file if needed
-      updateAccessTime(sha256).catch((error) => {
-        console.warn(`Failed to update access time:`, error);
-      });
-      return file;
+    const entry = await findCacheEntry(sha256);
+    if (!entry) {
+      return null;
     }
-    return null;
+
+    updateAccessTime(entry.sha256).catch((error) => {
+      console.warn("Failed to update access time:", error);
+    });
+
+    return Bun.file(entry.filePath);
   } catch {
     return null;
   }
@@ -350,7 +508,7 @@ export async function getCacheStats(): Promise<{
  */
 export async function pruneCache(): Promise<number> {
   if (MAX_CACHE_SIZE === null) {
-    return 0; // No size limit configured
+    return 0;
   }
 
   try {
@@ -358,10 +516,9 @@ export async function pruneCache(): Promise<number> {
     const currentSize = await getCacheSize();
 
     if (currentSize <= MAX_CACHE_SIZE) {
-      return 0; // Cache is within limits
+      return 0;
     }
 
-    // Calculate target size (90% of max to leave headroom)
     const targetSize = Math.floor(MAX_CACHE_SIZE * 0.9);
     const sizeToFree = currentSize - targetSize;
 
@@ -373,7 +530,6 @@ export async function pruneCache(): Promise<number> {
       `Cache size ${currentSize} exceeds limit ${MAX_CACHE_SIZE}, pruning...`,
     );
 
-    // Get least-recently-used blobs ordered by last_accessed
     const query = database.query<
       {
         sha256: string;
@@ -391,31 +547,26 @@ export async function pruneCache(): Promise<number> {
         break;
       }
 
-      const sha256 = row.sha256;
-      const fileSize = row.size;
-      const cachePath = getCachePath(sha256);
-
+      const entry = await findCacheEntry(row.sha256);
       try {
-        // Delete file from disk
-        const file = Bun.file(cachePath);
-        await file.delete();
+        if (entry) {
+          await Bun.file(entry.filePath).delete();
+        }
 
-        // Remove from database
         const deleteStmt = database.prepare(
           "DELETE FROM cache_metadata WHERE sha256 = ?",
         );
-        deleteStmt.run(sha256);
+        deleteStmt.run(row.sha256);
 
-        freedSize += fileSize;
-        prunedCount++;
+        freedSize += row.size;
+        prunedCount += 1;
       } catch (error) {
-        console.warn(`Failed to prune file ${sha256}:`, error);
-        // Remove from database even if file deletion fails
+        console.warn(`Failed to prune file ${row.sha256}:`, error);
         try {
           const deleteStmt = database.prepare(
             "DELETE FROM cache_metadata WHERE sha256 = ?",
           );
-          deleteStmt.run(sha256);
+          deleteStmt.run(row.sha256);
         } catch {
           // Ignore database errors
         }
@@ -439,7 +590,7 @@ export async function pruneCache(): Promise<number> {
  */
 export async function pruneCacheIfNeeded(): Promise<void> {
   if (MAX_CACHE_SIZE === null) {
-    return; // No size limit configured
+    return;
   }
 
   try {
@@ -458,11 +609,24 @@ export async function pruneCacheIfNeeded(): Promise<void> {
 export async function writeCache(
   sha256: string,
   data: Blob | ArrayBuffer,
+  extension?: string,
 ): Promise<void> {
-  const cachePath = getCachePath(sha256);
+  const normalizedSha = sha256.toLowerCase();
+  const normalizedExtension = normalizeCacheExtension(extension);
+  const cachePath = buildCachePath(normalizedSha, normalizedExtension);
   await Bun.write(cachePath, data);
 
-  // Trigger pruning check (don't await to avoid blocking)
+  const file = Bun.file(cachePath);
+  const stats = await file.stat();
+  const existing = await getMetadataRow(normalizedSha);
+  await persistCacheMetadata(
+    normalizedSha,
+    stats.size,
+    existing?.uploaded ?? Math.floor(Date.now() / 1000),
+    normalizedExtension,
+    Date.now(),
+  );
+
   pruneCacheIfNeeded().catch((error) => {
     console.warn("Pruning check failed:", error);
   });
@@ -476,18 +640,16 @@ export async function writeCacheWithMetadata(
   sha256: string,
   size: number,
   uploadedTimestamp: number,
+  extension?: string,
 ): Promise<void> {
   try {
-    const database = await ensureDatabase();
-    const now = Date.now();
-
-    const stmt = database.prepare(
-      `INSERT OR REPLACE INTO cache_metadata (sha256, last_accessed, size, uploaded)
-       VALUES (?, ?, ?, ?)`,
+    await persistCacheMetadata(
+      sha256.toLowerCase(),
+      size,
+      uploadedTimestamp,
+      normalizeCacheExtension(extension),
     );
-    stmt.run(sha256, now, size, uploadedTimestamp);
 
-    // Trigger pruning check (don't await to avoid blocking)
     pruneCacheIfNeeded().catch((error) => {
       console.warn("Pruning check failed:", error);
     });
@@ -505,14 +667,22 @@ export async function getUploadTimestampFromDb(
   sha256: string,
 ): Promise<number | null> {
   try {
-    const database = await ensureDatabase();
-    const stmt = database.prepare<{ uploaded: number | null }, [string]>(
-      "SELECT uploaded FROM cache_metadata WHERE sha256 = ?",
-    );
-    const result = stmt.get(sha256);
-    return result?.uploaded ?? null;
+    const row = await getMetadataRow(sha256.toLowerCase());
+    return row?.uploaded ?? null;
   } catch (error) {
     console.warn(`Failed to get upload timestamp for ${sha256}:`, error);
+    return null;
+  }
+}
+
+export async function getCacheExtensionFromDb(
+  sha256: string,
+): Promise<string | null> {
+  try {
+    const row = await getMetadataRow(sha256.toLowerCase());
+    return row ? normalizeCacheExtension(row.extension) : null;
+  } catch (error) {
+    console.warn(`Failed to get cache extension for ${sha256}:`, error);
     return null;
   }
 }
@@ -523,16 +693,14 @@ export async function getUploadTimestampFromDb(
  * @returns true if blob was deleted, false if not found
  */
 export async function deleteBlobFromCache(sha256: string): Promise<boolean> {
-  const cachePath = getCachePath(sha256);
+  const normalizedSha = sha256.toLowerCase();
   let fileDeleted = false;
   let dbDeleted = false;
 
   try {
-    // Delete file from disk
-    const file = Bun.file(cachePath);
-    const exists = await file.exists();
-    if (exists) {
-      await file.delete();
+    const entry = await findCacheEntry(normalizedSha);
+    if (entry) {
+      await Bun.file(entry.filePath).delete();
       fileDeleted = true;
     }
   } catch (error) {
@@ -540,12 +708,11 @@ export async function deleteBlobFromCache(sha256: string): Promise<boolean> {
   }
 
   try {
-    // Delete from database
     const database = await ensureDatabase();
     const deleteStmt = database.prepare(
       "DELETE FROM cache_metadata WHERE sha256 = ?",
     );
-    const result = deleteStmt.run(sha256);
+    const result = deleteStmt.run(normalizedSha);
     dbDeleted = result.changes > 0;
   } catch (error) {
     console.warn(`Failed to delete metadata for ${sha256}:`, error);

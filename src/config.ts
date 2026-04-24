@@ -71,3 +71,11 @@ export const ALLOWED_UPLOAD_IPS: string[] = Bun.env.ALLOWED_UPLOAD_IPS
       .map((ip) => ip.trim())
       .filter((ip) => ip.length > 0)
   : ["127.0.0.0/8", "::1", "::ffff:127.0.0.1"];
+
+/** Number of download worker threads */
+export const DOWNLOAD_WORKERS = Math.max(
+  1,
+  Bun.env.DOWNLOAD_WORKERS
+    ? parseInt(Bun.env.DOWNLOAD_WORKERS, 10) || 1
+    : navigator.hardwareConcurrency || 1,
+);
