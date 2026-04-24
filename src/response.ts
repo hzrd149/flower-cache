@@ -3,6 +3,13 @@
 import mime from "mime";
 import { PORT } from "./config";
 
+export const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, HEAD, PUT, DELETE",
+  "Access-Control-Allow-Headers": "Authorization, *",
+  "Access-Control-Max-Age": "86400",
+} as const;
+
 /**
  * Get content type from file extension
  */
@@ -102,7 +109,10 @@ export function getCacheControlHeaders(): Record<string, string> {
  */
 export function addCorsHeaders(response: Response): Response {
   const headers = new Headers(response.headers);
-  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set(
+    "Access-Control-Allow-Origin",
+    CORS_HEADERS["Access-Control-Allow-Origin"],
+  );
 
   return new Response(response.body, {
     status: response.status,

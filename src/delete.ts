@@ -1,6 +1,6 @@
 // Delete handler for BUD-02 DELETE /<sha256> endpoint
 
-import { createErrorResponse } from "./response";
+import { addCorsHeaders, createErrorResponse } from "./response";
 import { deleteBlobFromCache } from "./cache";
 import { validateAllowedIP } from "./security";
 
@@ -31,7 +31,7 @@ export async function handleDeleteRequest(
     const deleted = await deleteBlobFromCache(normalizedHash);
     if (deleted) {
       console.log(`[${normalizedHash}] ✓ Deleted from cache`);
-      return new Response(null, { status: 204 });
+      return addCorsHeaders(new Response(null, { status: 204 }));
     } else {
       return createErrorResponse(404, "Blob not found");
     }

@@ -4,7 +4,11 @@ import { parseRequest } from "./src/parser";
 import { handleBlobRequest } from "./src/handler";
 import { handleUploadRequest } from "./src/upload";
 import { handleDeleteRequest } from "./src/delete";
-import { createErrorResponse } from "./src/response";
+import {
+  addCorsHeaders,
+  CORS_HEADERS,
+  createErrorResponse,
+} from "./src/response";
 import { initializeCache } from "./src/cache";
 import { generateStatsPage } from "./src/stats";
 
@@ -18,12 +22,7 @@ const server = Bun.serve({
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, HEAD, PUT, DELETE",
-          "Access-Control-Allow-Headers": "Authorization, *",
-          "Access-Control-Max-Age": "86400",
-        },
+        headers: CORS_HEADERS,
       });
     }
 
@@ -31,12 +30,14 @@ const server = Bun.serve({
     if (req.method === "GET" && url.pathname === "/") {
       try {
         const html = await generateStatsPage();
-        return new Response(html, {
-          status: 200,
-          headers: {
-            "Content-Type": "text/html; charset=utf-8",
-          },
-        });
+        return addCorsHeaders(
+          new Response(html, {
+            status: 200,
+            headers: {
+              "Content-Type": "text/html; charset=utf-8",
+            },
+          }),
+        );
       } catch (error) {
         console.error("Error generating stats page:", error);
         return createErrorResponse(
@@ -48,12 +49,14 @@ const server = Bun.serve({
 
     // Handle HEAD / requests - health check
     if (req.method === "HEAD" && url.pathname === "/") {
-      return new Response(null, {
-        status: 200,
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-        },
-      });
+      return addCorsHeaders(
+        new Response(null, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+          },
+        }),
+      );
     }
 
     // Handle PUT /upload requests (BUD-02)
