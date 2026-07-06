@@ -1,6 +1,6 @@
 import { mkdir, rename } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { CACHE_DIR } from "./config";
+import { CACHE_DIR, DOWNLOAD_BUDGET } from "./config";
 import {
   buildCachePath,
   getPreferredExtensionFromMimeType,
@@ -78,11 +78,28 @@ async function writeValidatedBlobToCache(
 
 async function runDownload(job: DownloadJob): Promise<WorkerResponseMessage> {
   const startedAt = performance.now();
+  const deadline = startedAt + DOWNLOAD_BUDGET;
   let sawInvalidBlob = false;
+  let budgetExhausted = false;
 
   for (const server of job.servers) {
+    // Stop hunting once the overall time budget is spent, so a miss can't cost
+    // REQUEST_TIMEOUT × (number of servers).
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) {
+      budgetExhausted = true;
+      break;
+    }
+
     try {
-      const response = await fetchFromServer(server, job.sha256, job.extension);
+      const response = await fetchFromServer(
+        server,
+        job.sha256,
+        job.extension,
+        undefined,
+        0,
+        remaining,
+      );
 
       if (!response || !response.ok || !response.body) {
         continue;
@@ -126,6 +143,12 @@ async function runDownload(job: DownloadJob): Promise<WorkerResponseMessage> {
     warnDownload(
       job.sha256,
       "verify miss after invalid upstream blob responses",
+    );
+  }
+  if (budgetExhausted) {
+    warnDownload(
+      job.sha256,
+      `download budget exhausted after ${formatDurationMs(startedAt)}`,
     );
   }
   logDownload(job.sha256, `verify miss ${formatDurationMs(startedAt)}`);

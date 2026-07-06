@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { pruneCacheIfNeeded, updateAccessTime } from "./cache";
+import { MAX_DOWNLOAD_QUEUE } from "./config";
 import { errorDownload, logDownload } from "./download-log";
 import type {
   DownloadJob,
@@ -16,6 +17,14 @@ interface PendingJob {
 interface BusyWorker {
   jobId: string;
   sha256: string;
+}
+
+/** Thrown when the download queue is at capacity and can't accept more work. */
+export class DownloadQueueFullError extends Error {
+  constructor() {
+    super("Download queue is full");
+    this.name = "DownloadQueueFullError";
+  }
 }
 
 export class DownloadWorkerPool {
@@ -59,6 +68,12 @@ export class DownloadWorkerPool {
   ): Promise<DownloadResult> {
     if (this.isTerminating) {
       throw new Error("Download worker pool is shutting down");
+    }
+
+    // Reject work once the backlog is saturated. Only busy workers count as
+    // "in progress"; anything past that many is queued, so bound the queue.
+    if (this.queuedJobs.length >= MAX_DOWNLOAD_QUEUE) {
+      throw new DownloadQueueFullError();
     }
 
     return new Promise<DownloadResult>((resolve, reject) => {

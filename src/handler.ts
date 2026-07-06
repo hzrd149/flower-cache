@@ -7,7 +7,8 @@ import { resolveAuthorServers } from "./author";
 import { FALLBACK_SERVERS, LOOKUP_RELAYS } from "./config";
 import { errorDownload, formatDurationMs, logDownload } from "./download-log";
 import { getOrCreateDownload } from "./request-queue";
-import { getDownloadWorkerPool } from "./worker-pool";
+import { getDownloadWorkerPool, DownloadQueueFullError } from "./worker-pool";
+import { isKnownMissing, markMissing } from "./negative-cache";
 
 /**
  * Normalize a server URL by adding protocol if missing
@@ -67,24 +68,51 @@ export async function handleBlobRequest(
     );
   }
 
+  // If we recently confirmed this blob is missing everywhere, answer 404
+  // immediately instead of re-hunting every upstream server. This is what
+  // stops repeated polling for a not-yet-existent blob from amplifying into
+  // continuous upstream fan-out.
+  if (isKnownMissing(sha256)) {
+    logDownload(
+      sha256,
+      `download not found (cached) ${formatDurationMs(startedAt)}`,
+    );
+    return createErrorResponse(404, "Blob not found");
+  }
+
   // Not in cache, try to fetch from upstream servers using request deduplication
 
-  const downloadResult = await getOrCreateDownload(sha256, async () => {
-    const servers = await resolveCandidateServers(
-      sha256,
-      authorPubkeys,
-      serverHints,
-    );
+  let downloadResult;
+  try {
+    downloadResult = await getOrCreateDownload(sha256, async () => {
+      const servers = await resolveCandidateServers(
+        sha256,
+        authorPubkeys,
+        serverHints,
+      );
 
-    if (servers.length === 0) {
-      return { found: false };
+      if (servers.length === 0) {
+        return { found: false };
+      }
+
+      const workerPool = getDownloadWorkerPool();
+      return workerPool.download(sha256, servers, extension);
+    });
+  } catch (error) {
+    if (error instanceof DownloadQueueFullError) {
+      logDownload(sha256, `download rejected (busy) ${formatDurationMs(startedAt)}`);
+      return addCorsHeaders(
+        new Response("Server busy, try again later", {
+          status: 503,
+          headers: { "Retry-After": "5" },
+        }),
+      );
     }
-
-    const workerPool = getDownloadWorkerPool();
-    return workerPool.download(sha256, servers, extension);
-  });
+    throw error;
+  }
 
   if (!downloadResult.found) {
+    markMissing(sha256);
     logDownload(sha256, `download not found ${formatDurationMs(startedAt)}`);
     return createErrorResponse(404, "Blob not found");
   }

@@ -14,6 +14,7 @@ import {
   createBlobDescriptor,
 } from "./response";
 import { buildCachePath, normalizeCacheExtension } from "./cache-file";
+import { clearMissing } from "./negative-cache";
 import { validateAllowedIP } from "./security";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
@@ -87,6 +88,10 @@ export async function handleUploadRequest(
       // Finalize hash
       const computedHash = hasher.digest("hex").toLowerCase();
       writer.end();
+
+      // This blob now exists locally — drop any stale "missing" verdict so
+      // reads aren't served a negative-cached 404.
+      clearMissing(computedHash);
 
       // Get final size from file stats
       const stats = await tempFile.stat();

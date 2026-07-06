@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-07-06
+
+- Add a negative cache (`NEGATIVE_CACHE_TTL`) so repeated requests for a blob that is missing from all upstreams get an instant `404` instead of re-triggering a full upstream hunt every time the in-flight download resolves. Invalidated on upload.
+- Bound the total time spent hunting a single blob across all candidate servers with `DOWNLOAD_BUDGET`, so a miss can no longer cost `REQUEST_TIMEOUT × (number of servers)`.
+- Reject new downloads with `503 Retry-After` once `MAX_DOWNLOAD_QUEUE` jobs are queued, so a flood of distinct missing hashes can't grow the worker queue or upstream fan-out without bound.
+- Lower the default per-server `REQUEST_TIMEOUT` from 30s to 10s.
+
 ## 0.5.0 - 2026-07-06
 
 - Read BUD-10 server hints from the `xs` query parameter (spec-compliant), keeping `sx` as a legacy alias. Previously all server hints were silently ignored.

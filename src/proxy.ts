@@ -26,10 +26,15 @@ export async function fetchFromServer(
   extension?: string,
   rangeHeader?: string,
   redirectCount: number = 0,
+  timeoutMs: number = REQUEST_TIMEOUT,
 ): Promise<Response | null> {
   if (redirectCount > MAX_REDIRECTS) {
     return null; // Too many redirects
   }
+
+  // Never exceed the per-attempt timeout, but allow the caller to shrink it
+  // (e.g. when only a little of the overall download budget remains).
+  const attemptTimeout = Math.min(timeoutMs, REQUEST_TIMEOUT);
 
   const servers = normalizeServerUrl(server);
 
@@ -44,7 +49,7 @@ export async function fetchFromServer(
       }
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+      const timeoutId = setTimeout(() => controller.abort(), attemptTimeout);
 
       try {
         const response = await fetch(url, {
@@ -65,6 +70,7 @@ export async function fetchFromServer(
               extension,
               rangeHeader,
               redirectCount + 1,
+              timeoutMs,
             );
           }
         }
