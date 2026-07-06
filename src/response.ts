@@ -134,8 +134,10 @@ export function createErrorResponse(status: number, reason: string): Response {
  * @param size - The size of the blob in bytes
  * @param mimeType - The MIME type of the blob
  * @param uploadedTimestamp - Unix timestamp when blob was uploaded
- * @param extension - Optional file extension (with leading dot)
+ * @param extension - File extension (with leading dot). BUD-02 requires the
+ *   descriptor `url` to include an extension, so this defaults to `.bin`.
  * @param serverUrl - Optional server URL (defaults to localhost with PORT from config)
+ * @param status - HTTP status code (201 for newly stored blobs, 200 if it already existed)
  * @returns Response with blob descriptor JSON
  */
 export function createBlobDescriptor(
@@ -143,8 +145,9 @@ export function createBlobDescriptor(
   size: number,
   mimeType: string,
   uploadedTimestamp: number,
-  extension: string = "",
+  extension: string = ".bin",
   serverUrl?: string,
+  status: number = 200,
 ): Response {
   // Build URL with extension
   const path = `/${sha256}${extension}`;
@@ -160,7 +163,7 @@ export function createBlobDescriptor(
   };
 
   const response = new Response(JSON.stringify(descriptor, null, 2), {
-    status: 200,
+    status,
     headers: {
       "Content-Type": "application/json",
     },

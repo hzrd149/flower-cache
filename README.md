@@ -91,7 +91,7 @@ docker run -d \
 
 ## API Endpoints
 
-### GET /<sha256>[.ext][?as=<pubkey>&sx=<server>]
+### GET /<sha256>[.ext][?as=<pubkey>&xs=<server>]
 
 Retrieve a blob by its SHA-256 hash.
 
@@ -100,7 +100,7 @@ Retrieve a blob by its SHA-256 hash.
 - `sha256` (path): 64-character hexadecimal SHA-256 hash of the blob
 - `.ext` (optional): File extension (e.g., `.pdf`, `.png`)
 - `as` (query, optional): Author pubkey(s) for server discovery (can be repeated)
-- `sx` (query, optional): Server hint(s) where blob may be available (can be repeated)
+- `xs` (query, optional): Server hint(s) where blob may be available, per [BUD-10](https://github.com/hzrd149/blossom/blob/master/buds/10.md) (can be repeated). The legacy `sx` alias is also accepted.
 
 **Example:**
 
@@ -109,13 +109,13 @@ Retrieve a blob by its SHA-256 hash.
 curl http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf
 
 # With server hints
-curl "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com&sx=blossom.primal.net"
+curl "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?xs=cdn.example.com&xs=blossom.primal.net"
 
 # With author pubkey
 curl "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
 ```
 
-### HEAD /<sha256>[.ext][?as=<pubkey>&sx=<server>]
+### HEAD /<sha256>[.ext][?as=<pubkey>&xs=<server>]
 
 Check if a blob exists without downloading it.
 
@@ -135,7 +135,7 @@ CORS preflight requests are automatically handled.
 2. **Cache Check**: First checks local cache directory (`./cache/`) for the blob
 3. **Request Deduplication**: If multiple requests arrive for the same uncached blob, they share a single upstream fetch
 4. **Server Proxying**: If not cached, tries upstream servers in this order:
-   - Server hints from `sx` query parameter
+   - Server hints from `xs` query parameter
    - Author servers (from `as` query parameter via BUD-03 resolution)
    - Fallback servers (from `FALLBACK_SERVERS` environment variable, if configured)
 5. **Streaming Processing**: As data arrives from upstream:
@@ -229,7 +229,7 @@ web applications can use this proxy server to fetch blobs from any BUD-01 or BUD
 
 ### Transforming BUD-01 URLs
 
-Convert BUD-01 URLs to use the proxy by extracting the server domain and adding it as the `sx` parameter:
+Convert BUD-01 URLs to use the proxy by extracting the server domain and adding it as the `xs` parameter:
 
 ```javascript
 // Transform BUD-01 URL to proxy URL
@@ -241,9 +241,9 @@ function transformBud01Url(originalUrl, proxyBase = "http://localhost:24242") {
   // Extract server domain (remove protocol)
   const server = url.hostname;
 
-  // Build proxy URL with sx parameter
+  // Build proxy URL with xs parameter
   const proxyUrl = new URL(`/${sha256WithExt}`, proxyBase);
-  proxyUrl.searchParams.append("sx", server);
+  proxyUrl.searchParams.append("xs", server);
 
   return proxyUrl.toString();
 }
@@ -252,7 +252,7 @@ function transformBud01Url(originalUrl, proxyBase = "http://localhost:24242") {
 const originalUrl =
   "https://cdn.example.com/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf";
 const proxyUrl = transformBud01Url(originalUrl);
-// Result: "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com"
+// Result: "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?xs=cdn.example.com"
 ```
 
 ### Transforming BUD-10 URIs
@@ -272,11 +272,11 @@ function transformBud10Uri(blossomUri, proxyBase = "http://localhost:24242") {
   if (queryPart) {
     const params = new URLSearchParams(queryPart);
 
-    // Add sx parameters (server hints)
+    // Add xs parameters (server hints)
     params.getAll("xs").forEach((server) => {
       // Remove protocol if present
       const cleanServer = server.replace(/^https?:\/\//, "");
-      proxyUrl.searchParams.append("sx", cleanServer);
+      proxyUrl.searchParams.append("xs", cleanServer);
     });
 
     // Add as parameters (author pubkeys)
@@ -292,7 +292,7 @@ function transformBud10Uri(blossomUri, proxyBase = "http://localhost:24242") {
 const blossomUri =
   "blossom:b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?xs=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0";
 const proxyUrl = transformBud10Uri(blossomUri);
-// Result: "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?sx=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
+// Result: "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf?xs=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
 ```
 
 ## BUD-01 & BUD-10 Compliance
@@ -307,9 +307,15 @@ This server implements:
   - Error responses with X-Reason header
 
 - **BUD-10**: Blossom URI schema support
-  - `sx` parameter for server hints
+  - `xs` parameter for server hints (legacy `sx` alias accepted)
   - `as` parameter for author pubkeys
   - Server discovery via multiple hints
+
+- **BUD-02**: Blob upload and management (`PUT /upload`, `DELETE /<sha256>`)
+  - `201 Created` for newly stored blobs, `200 OK` when the blob already exists
+  - Optional `X-SHA-256` request header validation (`409 Conflict` on mismatch)
+
+> **Note on authorization:** upload and delete are **not** protected by [BUD-11](https://github.com/hzrd149/blossom/blob/master/buds/11.md) Nostr authorization. Because this is a local caching server, those endpoints are gated by an IP allowlist (`ALLOWED_UPLOAD_IPS`, defaulting to localhost) instead. This is a deliberate deviation from the spec.
 
 ## Error Responses
 

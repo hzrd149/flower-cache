@@ -5,7 +5,8 @@ import type { ParsedRequest } from "./types";
 
 /**
  * Parse request URL to extract sha256 hash, extension, and query parameters
- * Supports format: /<sha256>[.ext][?as=<pubkey>&sx=<server>]
+ * Supports format: /<sha256>[.ext][?as=<pubkey>&xs=<server>]
+ * (BUD-10 discovery hints; `sx` is accepted as a legacy alias for `xs`)
  */
 export function parseRequest(url: URL): ParsedRequest | null {
   // Extract pathname (remove leading slash)
@@ -25,9 +26,10 @@ export function parseRequest(url: URL): ParsedRequest | null {
 
   // Extract query parameters
   const authorPubkeys = url.searchParams.getAll("as").filter(isHexKey);
-  const serverHints = url.searchParams
-    .getAll("sx")
-    .map((s) => (s.startsWith("http") ? s : `https://${s}`));
+  const serverHints = [
+    ...url.searchParams.getAll("xs"),
+    ...url.searchParams.getAll("sx"), // legacy alias
+  ].map((s) => (s.startsWith("http") ? s : `https://${s}`));
 
   return {
     sha256,

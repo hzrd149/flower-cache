@@ -92,6 +92,17 @@ export async function handleUploadRequest(
       const stats = await tempFile.stat();
       const finalSize = stats.size;
 
+      // If the client provided an X-SHA-256 header, it MUST match the hash of
+      // the received body (BUD-02). Reject mismatches with 409 Conflict.
+      const claimedHash = req.headers.get("X-SHA-256")?.trim().toLowerCase();
+      if (claimedHash && claimedHash !== computedHash) {
+        await unlink(tempPath).catch(() => {});
+        return createErrorResponse(
+          409,
+          `X-SHA-256 (${claimedHash}) does not match the uploaded content (${computedHash})`,
+        );
+      }
+
       // Check if blob with this hash already exists
       const existingEntry = await findCacheEntry(computedHash);
 
@@ -136,13 +147,15 @@ export async function handleUploadRequest(
 
       console.log(`[${computedHash}] ✓ Upload completed: ${finalSize} bytes`);
 
-      // Return blob descriptor
+      // Return blob descriptor with 201 Created for a newly stored blob (BUD-02)
       return createBlobDescriptor(
         computedHash,
         finalSize,
         mimeType,
         uploadedTimestamp,
         normalizedExt,
+        undefined,
+        201,
       );
     } catch (error) {
       // Clean up temp file on error
