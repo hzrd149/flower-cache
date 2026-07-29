@@ -125,6 +125,46 @@ Check if a blob exists without downloading it.
 curl -I http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf
 ```
 
+### PUT /<sha256>
+
+Upload a blob using the BUD-13 path-based endpoint. The request body must hash to the SHA-256 value in the path.
+
+**Example:**
+
+```bash
+sha=$(sha256sum ./file.png | cut -d ' ' -f 1)
+curl -X PUT \
+  -H "Content-Type: image/png" \
+  --data-binary @./file.png \
+  "http://localhost:24242/$sha"
+```
+
+### PUT /<sha256>?url=<source>
+
+Mirror a blob from one or more absolute `http` or `https` source URLs using BUD-13 remote source upload mode. Repeat the `url` parameter to provide fallback sources. The fetched bytes must hash to the SHA-256 value in the path.
+
+**Example:**
+
+```bash
+curl -X PUT \
+  "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553?url=https%3A%2F%2Fcdn.example.com%2Fb1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553.pdf"
+```
+
+### PUT /<sha256>?xs=<server>&as=<pubkey>
+
+Mirror a blob from Blossom servers using BUD-10-style source hints. The server uses the same source ordering as GET requests: `xs`/`sx` server hints first, then `as` author server list resolution, then configured fallback servers.
+
+**Example:**
+
+```bash
+curl -X PUT \
+  "http://localhost:24242/b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553?xs=cdn.example.com&as=ec4425ff5e9446080d2f70440188e3ca5d6da8713db7bdeef73d0ed54d9093f0"
+```
+
+### PUT /upload
+
+Upload a blob using the legacy BUD-02 endpoint. If provided, the optional `X-SHA-256` header must match the uploaded body.
+
 ### OPTIONS /\*
 
 CORS preflight requests are automatically handled.
@@ -190,21 +230,21 @@ All configuration can be done via environment variables. You can also edit `src/
 
 ### Environment Variables
 
-| Variable                   | Description                                                                                                                 | Default                                             |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `PORT`                     | Server port number                                                                                                          | `24242`                                             |
-| `CACHE_DIR`                | Cache directory path where blobs are stored                                                                                 | `./cache`                                           |
-| `MAX_CACHE_SIZE`           | Maximum cache size (e.g., `10GB`, `500MB`, `1TB`). When exceeded, least-recently-used blobs are pruned.                     | (no limit)                                          |
-| `REQUEST_TIMEOUT`          | Upstream request timeout in milliseconds (per server attempt)                                                               | `10000` (10s)                                       |
-| `DOWNLOAD_BUDGET`          | Total time budget for one download across all upstream servers, bounding worst-case miss cost                              | `30000` (30s)                                       |
-| `MAX_DOWNLOAD_QUEUE`       | Max downloads queued for a free worker before requests are rejected with `503` (spam/backpressure guard)                    | `100`                                               |
-| `NEGATIVE_CACHE_TTL`       | How long (ms) to remember a not-found blob and answer repeats with an instant `404` (`0` disables)                          | `60000` (60s)                                       |
-| `NEGATIVE_CACHE_MAX_ENTRIES` | Max distinct missing hashes remembered by the negative cache (bounds memory)                                             | `10000`                                             |
-| `MAX_REDIRECTS`            | Maximum number of redirects to follow                                                                                       | `5`                                                 |
-| `USER_SERVER_LIST_TIMEOUT` | Timeout for looking up user server lists from Nostr relays (BUD-03) in milliseconds                                         | `20000` (20s)                                       |
-| `LOOKUP_RELAYS`            | Comma-separated list of Nostr relay URLs for author server lookup (BUD-03)                                                  | (empty)                                             |
-| `FALLBACK_SERVERS`         | Comma-separated list of Blossom server URLs to try as last resort (must include protocol: http:// or https://)              | (empty)                                             |
-| `ALLOWED_UPLOAD_IPS`       | Comma-separated list of allowed IP addresses and CIDR ranges for upload/delete endpoints (e.g., `192.168.0.0/24,127.0.0.1`) | `127.0.0.0/8,::1,::ffff:127.0.0.1` (localhost only) |
+| Variable                     | Description                                                                                                                 | Default                                             |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `PORT`                       | Server port number                                                                                                          | `24242`                                             |
+| `CACHE_DIR`                  | Cache directory path where blobs are stored                                                                                 | `./cache`                                           |
+| `MAX_CACHE_SIZE`             | Maximum cache size (e.g., `10GB`, `500MB`, `1TB`). When exceeded, least-recently-used blobs are pruned.                     | (no limit)                                          |
+| `REQUEST_TIMEOUT`            | Upstream request timeout in milliseconds (per server attempt)                                                               | `10000` (10s)                                       |
+| `DOWNLOAD_BUDGET`            | Total time budget for one download across all upstream servers, bounding worst-case miss cost                               | `30000` (30s)                                       |
+| `MAX_DOWNLOAD_QUEUE`         | Max downloads queued for a free worker before requests are rejected with `503` (spam/backpressure guard)                    | `100`                                               |
+| `NEGATIVE_CACHE_TTL`         | How long (ms) to remember a not-found blob and answer repeats with an instant `404` (`0` disables)                          | `60000` (60s)                                       |
+| `NEGATIVE_CACHE_MAX_ENTRIES` | Max distinct missing hashes remembered by the negative cache (bounds memory)                                                | `10000`                                             |
+| `MAX_REDIRECTS`              | Maximum number of redirects to follow                                                                                       | `5`                                                 |
+| `USER_SERVER_LIST_TIMEOUT`   | Timeout for looking up user server lists from Nostr relays (BUD-03) in milliseconds                                         | `20000` (20s)                                       |
+| `LOOKUP_RELAYS`              | Comma-separated list of Nostr relay URLs for author server lookup (BUD-03)                                                  | (empty)                                             |
+| `FALLBACK_SERVERS`           | Comma-separated list of Blossom server URLs to try as last resort (must include protocol: http:// or https://)              | (empty)                                             |
+| `ALLOWED_UPLOAD_IPS`         | Comma-separated list of allowed IP addresses and CIDR ranges for upload/delete endpoints (e.g., `192.168.0.0/24,127.0.0.1`) | `127.0.0.0/8,::1,::ffff:127.0.0.1` (localhost only) |
 
 ### Using Multiple Environment Variables
 
@@ -315,9 +355,12 @@ This server implements:
   - `as` parameter for author pubkeys
   - Server discovery via multiple hints
 
-- **BUD-02**: Blob upload and management (`PUT /upload`, `DELETE /<sha256>`)
+- **BUD-02/BUD-13**: Blob upload and management (`PUT /upload`, `PUT /<sha256>`, `DELETE /<sha256>`)
   - `201 Created` for newly stored blobs, `200 OK` when the blob already exists
-  - Optional `X-SHA-256` request header validation (`409 Conflict` on mismatch)
+  - Optional `X-SHA-256` request header validation for `PUT /upload` (`409 Conflict` on mismatch)
+  - Path-hash validation for `PUT /<sha256>` (`409 Conflict` on mismatch)
+  - BUD-13 remote source mirroring via repeated `url` parameters
+  - BUD-10 source-hint mirroring via `xs`, `sx`, and `as` parameters
 
 > **Note on authorization:** upload and delete are **not** protected by [BUD-11](https://github.com/hzrd149/blossom/blob/master/buds/11.md) Nostr authorization. Because this is a local caching server, those endpoints are gated by an IP allowlist (`ALLOWED_UPLOAD_IPS`, defaulting to localhost) instead. This is a deliberate deviation from the spec.
 

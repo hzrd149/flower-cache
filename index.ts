@@ -79,6 +79,32 @@ const server = Bun.serve({
       }
     }
 
+    // Handle PUT /<sha256> requests (BUD-13)
+    if (req.method === "PUT") {
+      const pathname = url.pathname.slice(1);
+      const sha256Match = pathname.match(/^([a-f0-9]{64})$/i);
+
+      if (!sha256Match) {
+        return createErrorResponse(
+          400,
+          "Invalid request: expected PUT /<sha256> format",
+        );
+      }
+
+      try {
+        return await handleUploadRequest(req, server, {
+          expectedSha256: sha256Match[1]!.toLowerCase(),
+          url,
+        });
+      } catch (error) {
+        console.error("Error handling BUD-13 upload request:", error);
+        return createErrorResponse(
+          500,
+          `Internal server error: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
+      }
+    }
+
     // Handle DELETE /<sha256> requests (BUD-02)
     if (req.method === "DELETE") {
       // Extract SHA-256 from pathname (remove leading slash)
