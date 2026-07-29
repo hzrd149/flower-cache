@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 - 2026-07-29
+
+- Add BUD-13 `PUT /<sha256>` path-based uploads with path-hash validation.
+- Support BUD-13 remote source mirroring with repeated `url` query parameters.
+- Support BUD-10-style mirroring from Blossom source hints via `xs`, `sx`, and `as` query parameters.
+- Keep legacy BUD-02 `PUT /upload` compatibility.
+
 ## 0.6.0 - 2026-07-06
 
 - Add a negative cache (`NEGATIVE_CACHE_TTL`) so repeated requests for a blob that is missing from all upstreams get an instant `404` instead of re-triggering a full upstream hunt every time the in-flight download resolves. Invalidated on upload.
