@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { CACHE_DIR, REQUEST_TIMEOUT } from "./config";
 import { resolveCandidateServers } from "./servers";
 import { fetchFromServer } from "./proxy";
+import { logDownload } from "./download-log";
 
 interface UploadOptions {
   expectedSha256?: string;
@@ -295,7 +296,7 @@ async function storeTempBlob(
   const existing = await createExistingBlobDescriptor(temp.computedHash);
   if (existing) {
     await unlink(temp.tempPath).catch(() => {});
-    console.log(`[${temp.computedHash}] Upload skipped: blob already exists`);
+    logDownload(temp.computedHash, "upload skipped: blob already exists");
     return existing;
   }
 
@@ -311,7 +312,7 @@ async function storeTempBlob(
     normalizedExt,
   );
 
-  console.log(`[${temp.computedHash}] ✓ Upload completed: ${temp.size} bytes`);
+  logDownload(temp.computedHash, `✓ upload completed: ${temp.size} bytes`);
 
   return createBlobDescriptor(
     temp.computedHash,
