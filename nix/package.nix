@@ -73,7 +73,6 @@ let
       cp -R ${nodeModules}/node_modules "$app/"
 
       makeWrapper ${lib.getExe pkgs.bun} "$out/bin/flower-cache" \
-        --chdir "$app" \
         --add-flags "run" \
         --add-flags "$app/index.ts"
 
