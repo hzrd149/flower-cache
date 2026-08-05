@@ -33,3 +33,9 @@ cache
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# Nix build output
+result
+
+# NixOS VM disk image
+*.qcow2
