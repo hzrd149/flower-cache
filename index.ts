@@ -1,5 +1,10 @@
 #!/usr/bin/env bun
-import { PORT, CACHE_DIR, DOWNLOAD_WORKERS } from "./src/config";
+import {
+  PORT,
+  CACHE_DIR,
+  DOWNLOAD_WORKERS,
+  REQUEST_IDLE_TIMEOUT,
+} from "./src/config";
 import { parseRequest } from "./src/parser";
 import { handleBlobRequest } from "./src/handler";
 import { handleUploadRequest } from "./src/upload";
@@ -22,6 +27,7 @@ initializeDownloadWorkerPool(DOWNLOAD_WORKERS);
 // Main server
 const server = Bun.serve({
   port: PORT,
+  idleTimeout: REQUEST_IDLE_TIMEOUT,
   async fetch(req): Promise<Response> {
     const url = new URL(req.url);
 

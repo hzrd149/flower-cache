@@ -23,6 +23,72 @@ export const DOWNLOAD_BUDGET = Bun.env.DOWNLOAD_BUDGET
   : 30000; // 30 seconds
 
 /**
+ * How long (ms) an upstream body transfer may make no progress at all before
+ * it is aborted. DOWNLOAD_BUDGET only bounds the search for a server; without
+ * this, an upstream that sends headers and then trickles (or nothing) pins a
+ * download worker forever.
+ */
+export const DOWNLOAD_STALL_TIMEOUT = Bun.env.DOWNLOAD_STALL_TIMEOUT
+  ? parseInt(Bun.env.DOWNLOAD_STALL_TIMEOUT, 10)
+  : 15000; // 15 seconds
+
+/**
+ * Minimum sustained throughput (bytes/second) an upstream transfer must hold,
+ * measured once it has been running for DOWNLOAD_STALL_TIMEOUT. Stops a drip
+ * that is slow but too regular to trip the stall timer.
+ */
+export const DOWNLOAD_MIN_SPEED = Bun.env.DOWNLOAD_MIN_SPEED
+  ? parseInt(Bun.env.DOWNLOAD_MIN_SPEED, 10)
+  : 16 * 1024; // 16 KiB/s
+
+/**
+ * Hard ceiling (ms) on a single blob transfer, regardless of throughput. Bounds
+ * how long one request can occupy a download worker.
+ */
+export const DOWNLOAD_MAX_DURATION = Bun.env.DOWNLOAD_MAX_DURATION
+  ? parseInt(Bun.env.DOWNLOAD_MAX_DURATION, 10)
+  : 1800000; // 30 minutes
+
+/**
+ * How long (ms) a download may sit waiting for a free worker before the caller
+ * is rejected with 503. Without it, a saturated pool leaves clients hanging.
+ */
+export const DOWNLOAD_QUEUE_TIMEOUT = Bun.env.DOWNLOAD_QUEUE_TIMEOUT
+  ? parseInt(Bun.env.DOWNLOAD_QUEUE_TIMEOUT, 10)
+  : 30000; // 30 seconds
+
+/**
+ * Backstop (ms) covering a download's entire life: queue wait plus execution.
+ * The worker is expected to bound itself first, so this only fires when a
+ * worker has genuinely stopped responding — the caller gets a 504 and the
+ * worker is replaced rather than the request hanging forever.
+ */
+export const DOWNLOAD_JOB_TIMEOUT = Bun.env.DOWNLOAD_JOB_TIMEOUT
+  ? parseInt(Bun.env.DOWNLOAD_JOB_TIMEOUT, 10)
+  : DOWNLOAD_BUDGET + DOWNLOAD_MAX_DURATION + 30000;
+
+/**
+ * Seconds a connection may sit without traffic before Bun closes it. Bun's
+ * 10s default silently drops any request whose upstream fetch runs longer —
+ * including the 503/504 the download pool produces — so the caller sees a
+ * dead socket instead of an answer. Bun caps this at 255 seconds.
+ */
+export const REQUEST_IDLE_TIMEOUT = Math.min(
+  255,
+  Math.max(
+    0,
+    Bun.env.REQUEST_IDLE_TIMEOUT
+      ? parseInt(Bun.env.REQUEST_IDLE_TIMEOUT, 10) || 0
+      : 120,
+  ),
+);
+
+/** Delay (ms) before replacing a lost download worker; rate-limits crash loops. */
+export const WORKER_RESPAWN_DELAY = Bun.env.WORKER_RESPAWN_DELAY
+  ? parseInt(Bun.env.WORKER_RESPAWN_DELAY, 10)
+  : 1000;
+
+/**
  * How long (ms) to remember that a blob was not found upstream, so repeated
  * requests for the same missing hash are answered instantly with 404 instead
  * of re-hunting every upstream server. Set to 0 to disable negative caching.

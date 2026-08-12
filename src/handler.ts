@@ -4,7 +4,12 @@ import type { ParsedRequest } from "./types";
 import { ensureCacheDir, checkCache } from "./cache";
 import { errorDownload, formatDurationMs, logDownload } from "./download-log";
 import { getOrCreateDownload } from "./request-queue";
-import { getDownloadWorkerPool, DownloadQueueFullError } from "./worker-pool";
+import {
+  getDownloadWorkerPool,
+  DownloadJobTimeoutError,
+  DownloadQueueFullError,
+  DownloadQueueTimeoutError,
+} from "./worker-pool";
 import { isKnownMissing, markMissing } from "./negative-cache";
 import { resolveCandidateServers } from "./servers";
 import {
@@ -80,7 +85,10 @@ export async function handleBlobRequest(
       return workerPool.download(sha256, servers, extension);
     });
   } catch (error) {
-    if (error instanceof DownloadQueueFullError) {
+    if (
+      error instanceof DownloadQueueFullError ||
+      error instanceof DownloadQueueTimeoutError
+    ) {
       logDownload(
         sha256,
         `download rejected (busy) ${formatDurationMs(startedAt)}`,
@@ -92,6 +100,17 @@ export async function handleBlobRequest(
         }),
       );
     }
+
+    if (error instanceof DownloadJobTimeoutError) {
+      logDownload(sha256, `download timed out ${formatDurationMs(startedAt)}`);
+      return addCorsHeaders(
+        new Response("Upstream download timed out", {
+          status: 504,
+          headers: { "Retry-After": "30" },
+        }),
+      );
+    }
+
     throw error;
   }
 

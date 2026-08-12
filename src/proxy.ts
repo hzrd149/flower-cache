@@ -19,6 +19,11 @@ export function normalizeServerUrl(server: string): string[] {
 /**
  * Fetch blob from upstream server
  * Handles redirects, timeouts, and multiple server attempts
+ *
+ * @param bodySignal - Optional caller-owned signal that stays armed after the
+ *   response headers arrive. The internal timeout only covers the header phase
+ *   (a healthy large transfer must not be killed by it), so consumers that read
+ *   the body are responsible for bounding it and aborting through this signal.
  */
 export async function fetchFromServer(
   server: string,
@@ -27,9 +32,14 @@ export async function fetchFromServer(
   rangeHeader?: string,
   redirectCount: number = 0,
   timeoutMs: number = REQUEST_TIMEOUT,
+  bodySignal?: AbortSignal,
 ): Promise<Response | null> {
   if (redirectCount > MAX_REDIRECTS) {
     return null; // Too many redirects
+  }
+
+  if (bodySignal?.aborted) {
+    return null;
   }
 
   // Never exceed the per-attempt timeout, but allow the caller to shrink it
@@ -50,11 +60,16 @@ export async function fetchFromServer(
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), attemptTimeout);
+      // The header timer is cleared below, but bodySignal is not, so the caller
+      // keeps a live handle on the connection for as long as it reads the body.
+      const signal = bodySignal
+        ? AbortSignal.any([controller.signal, bodySignal])
+        : controller.signal;
 
       try {
         const response = await fetch(url, {
           headers,
-          signal: controller.signal,
+          signal,
         });
 
         clearTimeout(timeoutId);
@@ -71,6 +86,7 @@ export async function fetchFromServer(
               rangeHeader,
               redirectCount + 1,
               timeoutMs,
+              bodySignal,
             );
           }
         }
@@ -89,6 +105,11 @@ export async function fetchFromServer(
         return null;
       } catch (error) {
         clearTimeout(timeoutId);
+        // The caller gave up on this blob entirely (budget spent, stalled
+        // transfer) — don't fall through to the http:// variant or another URL.
+        if (bodySignal?.aborted) {
+          return null;
+        }
         // Network error or timeout, try next server
         if (error instanceof Error && error.name === "AbortError") {
           continue;

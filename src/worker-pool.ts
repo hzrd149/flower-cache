@@ -1,22 +1,28 @@
 import { randomUUID } from "node:crypto";
 import { pruneCacheIfNeeded, updateAccessTime } from "./cache";
-import { MAX_DOWNLOAD_QUEUE } from "./config";
-import { errorDownload, logDownload } from "./download-log";
+import {
+  DOWNLOAD_JOB_TIMEOUT,
+  DOWNLOAD_QUEUE_TIMEOUT,
+  MAX_DOWNLOAD_QUEUE,
+  WORKER_RESPAWN_DELAY,
+} from "./config";
+import { errorDownload, warnDownload } from "./download-log";
 import type {
   DownloadJob,
   DownloadResult,
   WorkerResponseMessage,
 } from "./worker-protocol";
 
-interface PendingJob {
+interface TrackedJob {
   job: DownloadJob;
   resolve: (result: DownloadResult) => void;
   reject: (error: Error) => void;
-}
-
-interface BusyWorker {
-  jobId: string;
-  sha256: string;
+  /** Backstop covering queue wait plus execution. */
+  jobTimer: ReturnType<typeof setTimeout>;
+  /** Bounds queue wait only; cleared once the job reaches a worker. */
+  queueTimer?: ReturnType<typeof setTimeout>;
+  worker?: Worker;
+  settled: boolean;
 }
 
 /** Thrown when the download queue is at capacity and can't accept more work. */
@@ -27,37 +33,41 @@ export class DownloadQueueFullError extends Error {
   }
 }
 
+/** Thrown when a download waited too long for a free worker. */
+export class DownloadQueueTimeoutError extends Error {
+  constructor() {
+    super("Timed out waiting for a download worker");
+    this.name = "DownloadQueueTimeoutError";
+  }
+}
+
+/** Thrown when a download exceeded its overall deadline. */
+export class DownloadJobTimeoutError extends Error {
+  constructor() {
+    super("Download timed out");
+    this.name = "DownloadJobTimeoutError";
+  }
+}
+
 export class DownloadWorkerPool {
-  private readonly workers: Worker[] = [];
+  private readonly workers = new Set<Worker>();
   private readonly idleWorkers: Worker[] = [];
-  private readonly busyWorkers = new Map<Worker, BusyWorker>();
-  private readonly pendingJobs = new Map<
-    string,
-    {
-      resolve: (result: DownloadResult) => void;
-      reject: (error: Error) => void;
-    }
-  >();
-  private readonly queuedJobs: PendingJob[] = [];
+  private readonly busyWorkers = new Map<Worker, TrackedJob>();
+  private readonly pendingJobs = new Map<string, TrackedJob>();
+  private readonly queuedJobs: TrackedJob[] = [];
+  private readonly targetWorkerCount: number;
+  private respawnTimer: ReturnType<typeof setTimeout> | null = null;
   private isTerminating = false;
 
   constructor(workerCount: number) {
-    for (let index = 0; index < workerCount; index += 1) {
-      const worker = new Worker(
-        new URL("./download-worker.ts", import.meta.url).href,
-        { type: "module" },
-      );
+    this.targetWorkerCount = Math.max(1, workerCount);
 
-      worker.onmessage = (event: MessageEvent<WorkerResponseMessage>) => {
-        void this.handleWorkerMessage(worker, event.data);
-      };
+    for (let index = 0; index < this.targetWorkerCount; index += 1) {
+      this.spawnWorker();
+    }
 
-      worker.onerror = (event) => {
-        this.handleWorkerFailure(worker, new Error(event.message));
-      };
-
-      this.workers.push(worker);
-      this.idleWorkers.push(worker);
+    if (this.workers.size < this.targetWorkerCount) {
+      this.scheduleRespawn();
     }
   }
 
@@ -85,7 +95,26 @@ export class DownloadWorkerPool {
         servers,
       };
 
-      this.queuedJobs.push({ job, resolve, reject });
+      const tracked: TrackedJob = {
+        job,
+        resolve,
+        reject,
+        settled: false,
+        // Assigned immediately below; the timers need `tracked` to exist first.
+        jobTimer: undefined as unknown as ReturnType<typeof setTimeout>,
+      };
+
+      // Every caller gets an answer, even if a worker never reports back.
+      tracked.jobTimer = setTimeout(
+        () => this.handleJobTimeout(tracked),
+        DOWNLOAD_JOB_TIMEOUT,
+      );
+      tracked.queueTimer = setTimeout(
+        () => this.handleQueueTimeout(tracked),
+        DOWNLOAD_QUEUE_TIMEOUT,
+      );
+
+      this.queuedJobs.push(tracked);
       this.dispatchNext();
     });
   }
@@ -93,19 +122,160 @@ export class DownloadWorkerPool {
   async terminate(): Promise<void> {
     this.isTerminating = true;
 
-    while (this.queuedJobs.length > 0) {
-      const pending = this.queuedJobs.shift();
-      pending?.reject(new Error("Download worker pool terminated"));
+    if (this.respawnTimer) {
+      clearTimeout(this.respawnTimer);
+      this.respawnTimer = null;
     }
 
-    for (const pending of this.pendingJobs.values()) {
-      pending.reject(new Error("Download worker pool terminated"));
-    }
+    const abandoned = [...this.queuedJobs, ...this.pendingJobs.values()];
+    this.queuedJobs.length = 0;
     this.pendingJobs.clear();
     this.busyWorkers.clear();
     this.idleWorkers.length = 0;
 
-    await Promise.all(this.workers.map((worker) => worker.terminate()));
+    for (const tracked of abandoned) {
+      this.settle(tracked, () =>
+        tracked.reject(new Error("Download worker pool terminated")),
+      );
+    }
+
+    const workers = [...this.workers];
+    this.workers.clear();
+    await Promise.all(workers.map((worker) => worker.terminate()));
+  }
+
+  /** Resolve or reject exactly once, clearing the job's timers. */
+  private settle(tracked: TrackedJob, complete: () => void): void {
+    if (tracked.settled) {
+      return;
+    }
+
+    tracked.settled = true;
+    clearTimeout(tracked.jobTimer);
+    if (tracked.queueTimer) {
+      clearTimeout(tracked.queueTimer);
+      tracked.queueTimer = undefined;
+    }
+
+    complete();
+  }
+
+  private removeFromQueue(tracked: TrackedJob): boolean {
+    const index = this.queuedJobs.indexOf(tracked);
+    if (index < 0) {
+      return false;
+    }
+
+    this.queuedJobs.splice(index, 1);
+    return true;
+  }
+
+  private spawnWorker(): boolean {
+    if (this.isTerminating) {
+      return false;
+    }
+
+    try {
+      const worker = new Worker(
+        new URL("./download-worker.ts", import.meta.url).href,
+        { type: "module" },
+      );
+
+      worker.onmessage = (event: MessageEvent<WorkerResponseMessage>) => {
+        void this.handleWorkerMessage(worker, event.data);
+      };
+
+      worker.onerror = (event) => {
+        this.replaceWorker(
+          worker,
+          new Error(event.message || "Download worker error"),
+        );
+      };
+
+      this.workers.add(worker);
+      this.idleWorkers.push(worker);
+      return true;
+    } catch (error) {
+      console.error(
+        "[pool] Failed to spawn download worker:",
+        error instanceof Error ? error.message : error,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Retire a worker that crashed or went unresponsive and bring the pool back
+   * to strength. Without this the pool silently shrinks to zero and every
+   * queued download hangs forever.
+   */
+  private replaceWorker(worker: Worker, error: Error): void {
+    const wasTracked = this.workers.delete(worker);
+
+    const idleIndex = this.idleWorkers.indexOf(worker);
+    if (idleIndex >= 0) {
+      this.idleWorkers.splice(idleIndex, 1);
+    }
+
+    const tracked = this.busyWorkers.get(worker);
+    if (tracked) {
+      this.busyWorkers.delete(worker);
+      this.pendingJobs.delete(tracked.job.jobId);
+
+      if (!tracked.settled) {
+        errorDownload(tracked.job.sha256, `worker lost ${error.message}`);
+        this.settle(tracked, () => tracked.reject(error));
+      }
+    }
+
+    try {
+      void worker.terminate();
+    } catch {
+      // ignore termination failures for an already-dead worker
+    }
+
+    if (!wasTracked || this.isTerminating) {
+      return;
+    }
+
+    console.warn(
+      `[pool] Download worker lost (${error.message}); ${this.workers.size}/${this.targetWorkerCount} remaining`,
+    );
+    this.scheduleRespawn();
+  }
+
+  /**
+   * Refill the pool after a short delay, so a worker that fails on startup
+   * can't spin in a tight respawn loop.
+   */
+  private scheduleRespawn(): void {
+    if (this.isTerminating || this.respawnTimer) {
+      return;
+    }
+
+    this.respawnTimer = setTimeout(() => {
+      this.respawnTimer = null;
+
+      if (this.isTerminating) {
+        return;
+      }
+
+      let spawned = false;
+      while (this.workers.size < this.targetWorkerCount) {
+        if (!this.spawnWorker()) {
+          break;
+        }
+        spawned = true;
+      }
+
+      if (spawned) {
+        this.dispatchNext();
+      }
+
+      if (this.workers.size < this.targetWorkerCount) {
+        this.scheduleRespawn();
+      }
+    }, WORKER_RESPAWN_DELAY);
   }
 
   private dispatchNext(): void {
@@ -115,21 +285,61 @@ export class DownloadWorkerPool {
 
     while (this.idleWorkers.length > 0 && this.queuedJobs.length > 0) {
       const worker = this.idleWorkers.shift();
-      const pending = this.queuedJobs.shift();
+      const tracked = this.queuedJobs.shift();
 
-      if (!worker || !pending) {
+      if (!worker || !tracked) {
         return;
       }
 
-      this.pendingJobs.set(pending.job.jobId, {
-        resolve: pending.resolve,
-        reject: pending.reject,
-      });
-      this.busyWorkers.set(worker, {
-        jobId: pending.job.jobId,
-        sha256: pending.job.sha256,
-      });
-      worker.postMessage(pending.job);
+      if (tracked.settled) {
+        // Timed out while queued; put the worker back and take the next job.
+        this.idleWorkers.unshift(worker);
+        continue;
+      }
+
+      if (tracked.queueTimer) {
+        clearTimeout(tracked.queueTimer);
+        tracked.queueTimer = undefined;
+      }
+
+      tracked.worker = worker;
+      this.pendingJobs.set(tracked.job.jobId, tracked);
+      this.busyWorkers.set(worker, tracked);
+      worker.postMessage(tracked.job);
+    }
+  }
+
+  private handleQueueTimeout(tracked: TrackedJob): void {
+    if (tracked.settled || !this.removeFromQueue(tracked)) {
+      return;
+    }
+
+    warnDownload(
+      tracked.job.sha256,
+      `download rejected after ${DOWNLOAD_QUEUE_TIMEOUT}ms waiting for a worker`,
+    );
+    this.settle(tracked, () => tracked.reject(new DownloadQueueTimeoutError()));
+  }
+
+  private handleJobTimeout(tracked: TrackedJob): void {
+    if (tracked.settled) {
+      return;
+    }
+
+    this.removeFromQueue(tracked);
+    this.pendingJobs.delete(tracked.job.jobId);
+
+    errorDownload(
+      tracked.job.sha256,
+      `download timed out after ${DOWNLOAD_JOB_TIMEOUT}ms`,
+    );
+    this.settle(tracked, () => tracked.reject(new DownloadJobTimeoutError()));
+
+    // The worker is wedged on a job that should have bounded itself, so it
+    // can't be trusted with the next one.
+    const worker = tracked.worker;
+    if (worker && this.busyWorkers.get(worker) === tracked) {
+      this.replaceWorker(worker, new DownloadJobTimeoutError());
     }
   }
 
@@ -137,49 +347,40 @@ export class DownloadWorkerPool {
     worker: Worker,
     message: WorkerResponseMessage,
   ): Promise<void> {
-    const pending = this.pendingJobs.get(message.jobId);
+    const tracked = this.pendingJobs.get(message.jobId);
     this.pendingJobs.delete(message.jobId);
-    this.busyWorkers.delete(worker);
 
-    if (!this.isTerminating) {
+    if (this.busyWorkers.get(worker) === tracked) {
+      this.busyWorkers.delete(worker);
+    }
+
+    // Only recycle a worker the pool still owns — a replaced one must stay out.
+    if (!this.isTerminating && this.workers.has(worker)) {
       this.idleWorkers.push(worker);
       this.dispatchNext();
     }
 
-    if (!pending) {
+    // Late reply for a job that already timed out, or an unknown job id.
+    if (!tracked || tracked.settled) {
       return;
     }
 
     if (message.type === "download:complete") {
       await updateAccessTime(message.sha256, message.size);
       void pruneCacheIfNeeded();
-      pending.resolve({ found: true, size: message.size });
+      this.settle(tracked, () =>
+        tracked.resolve({ found: true, size: message.size }),
+      );
       return;
     }
 
     if (message.type === "download:notFound") {
-      pending.resolve({ found: false });
+      this.settle(tracked, () => tracked.resolve({ found: false }));
       return;
     }
 
     errorDownload(message.sha256, `worker error ${message.error}`);
-    pending.reject(new Error(message.error));
-  }
-
-  private handleWorkerFailure(worker: Worker, error: Error): void {
-    const busy = this.busyWorkers.get(worker);
-    if (busy) {
-      this.busyWorkers.delete(worker);
-      const pending = this.pendingJobs.get(busy.jobId);
-      this.pendingJobs.delete(busy.jobId);
-      errorDownload(busy.sha256, `worker crashed ${error.message}`);
-      pending?.reject(error);
-    }
-
-    const idleIndex = this.idleWorkers.indexOf(worker);
-    if (idleIndex >= 0) {
-      this.idleWorkers.splice(idleIndex, 1);
-    }
+    this.settle(tracked, () => tracked.reject(new Error(message.error)));
   }
 }
 
