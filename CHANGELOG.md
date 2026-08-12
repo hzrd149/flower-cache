@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.1 - 2026-08-12
+
+- Bound upstream body transfers with `DOWNLOAD_STALL_TIMEOUT`, `DOWNLOAD_MIN_SPEED`, and `DOWNLOAD_MAX_DURATION`. Nothing previously limited the body read once response headers arrived, so an upstream reached via `xs` that answered `200` and then trickled could pin a download worker indefinitely and starve the pool for every other request.
+- Replace download workers that crash or stop responding, instead of letting the pool shrink toward zero and leave queued downloads permanently unanswered.
+- Bound how long a download may wait for a free worker (`DOWNLOAD_QUEUE_TIMEOUT`, answered with `503`) and its total lifetime (`DOWNLOAD_JOB_TIMEOUT`, answered with `504`), so a request can no longer hang indefinitely.
+- Add `REQUEST_IDLE_TIMEOUT` (default 120s). Bun's 10s default silently dropped the client connection on any cache miss that took longer to fetch, including the error responses above; the blob still cached, but the first requester never received it.
+- Flush cached blob writes every 4 MiB so an upstream delivering faster than the disk can absorb no longer grows the write buffer without bound.
+
 ## 0.7.0 - 2026-07-29
 
 - Add BUD-13 `PUT /<sha256>` path-based uploads with path-hash validation.
