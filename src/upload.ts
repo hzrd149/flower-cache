@@ -44,6 +44,9 @@ interface RemoteFetchResult {
   response: Response;
 }
 
+/** Bound Bun's file-sink buffer when a remote upload outpaces disk writes. */
+const FLUSH_INTERVAL_BYTES = 4 * 1024 * 1024;
+
 /**
  * Handle PUT /upload request
  * @param req - The request object
@@ -236,6 +239,7 @@ async function writeStreamToTempFile(
   const writer = tempFile.writer();
   const hasher = new Bun.CryptoHasher("sha256");
   let size = 0;
+  let flushedAt = 0;
 
   try {
     const reader = stream.getReader();
@@ -246,6 +250,11 @@ async function writeStreamToTempFile(
       hasher.update(value);
       writer.write(value);
       size += value.length;
+
+      if (size - flushedAt >= FLUSH_INTERVAL_BYTES) {
+        await writer.flush();
+        flushedAt = size;
+      }
     }
 
     writer.end();
