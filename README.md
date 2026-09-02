@@ -178,13 +178,40 @@ CORS preflight requests are automatically handled.
    - Server hints from `xs` query parameter
    - Author servers (from `as` query parameter via BUD-03 resolution)
    - Fallback servers (from `FALLBACK_SERVERS` environment variable, if configured)
-5. **Streaming Processing**: As data arrives from upstream:
-   - Streams data immediately to waiting clients
-   - Calculates SHA-256 hash incrementally
-   - Writes chunks to cache file as they arrive
-6. **Hash Validation**: After stream completes, validates computed hash matches requested SHA-256 hash
-7. **Cache Cleanup**: If hash validation fails, invalid cache file is automatically deleted
-8. **Response**: Returns blob with proper headers (Content-Type, ETag, Cache-Control)
+5. **Transfer**: As data arrives from upstream it is hashed incrementally and written to a temporary file
+6. **Stream-through**: Once the transfer is known to be large enough (see `STREAM_THROUGH_MIN_SIZE`),
+   the response starts immediately and chunks are relayed to the client as they arrive, rather than
+   the client waiting for the whole download. See [Stream-through](#stream-through) below
+7. **Hash Validation**: When the transfer completes, the computed hash is checked against the requested one
+8. **Cache Commit**: Only a blob that hashes correctly is renamed into the cache; a bad one is deleted
+9. **Response**: Returns blob with proper headers (Content-Type, ETag, Cache-Control)
+
+### Stream-through
+
+Time-to-first-byte on a cache miss used to be the length of the entire upstream transfer — a large
+blob from a slow server meant a long silence before anything reached the client. Misses are now
+served while they download.
+
+The catch is that a blob's hash isn't known until its last byte arrives, so a streamed response is
+sent before it can be verified. The trade-off is drawn deliberately:
+
+- **The cache is never wrong.** A blob is only committed to `CACHE_DIR` after it hashes correctly,
+  so a bad upstream can never poison later requests. It is written to a temporary file first and
+  deleted on mismatch.
+- **Small blobs are still verified first.** Below `STREAM_THROUGH_MIN_SIZE` (2MB by default) the old
+  download-verify-serve path is used, which also keeps the ability to fail over to another server
+  when one serves the wrong bytes. Blobs that big are fast to fetch anyway. An upstream that doesn't
+  declare a `Content-Length` is measured as it arrives, so the threshold means the same thing either
+  way.
+- **Above the threshold, bytes are served unverified.** If the hash turns out to be wrong the client
+  keeps what it got (with a warning logged and nothing cached). Clients that verify hashes
+  themselves — as Blossom clients generally do — still catch it. Set `STREAM_THROUGH=false` to
+  return to store-and-forward everywhere.
+
+Only plain full-body `GET` requests stream. `HEAD` has no body, and a `Range` request wants bytes
+from an offset rather than a transfer from zero, so both download first and are then served from the
+cache. Concurrent requests for the same uncached blob still share one upstream fetch: the first
+requester streams, the rest wait and are served from the cache.
 
 ## Caching
 
@@ -240,6 +267,9 @@ All configuration can be done via environment variables. You can also edit `src/
 | `DOWNLOAD_STALL_TIMEOUT`     | Abort an upstream transfer that delivers no bytes for this long                                                             | `15000` (15s)                                       |
 | `DOWNLOAD_MIN_SPEED`         | Minimum sustained upstream throughput in bytes/sec, enforced after `DOWNLOAD_STALL_TIMEOUT` has elapsed                     | `16384` (16 KiB/s)                                  |
 | `DOWNLOAD_MAX_DURATION`      | Hard ceiling on a single blob transfer regardless of throughput                                                             | `1800000` (30m)                                     |
+| `STREAM_THROUGH`             | Serve a cache miss while it is still downloading instead of waiting for the whole transfer                                  | `true`                                              |
+| `STREAM_THROUGH_MIN_SIZE`    | Blob size (e.g. `2MB`) at or above which a miss is streamed; smaller blobs are verified before a byte is sent               | `2MB`                                               |
+| `STREAM_CHUNK_CREDITS`       | Chunks a download worker may push ahead of a slow client before waiting (bounds memory per streamed transfer)               | `8`                                                 |
 | `MAX_DOWNLOAD_QUEUE`         | Max downloads queued for a free worker before requests are rejected with `503` (spam/backpressure guard)                    | `100`                                               |
 | `DOWNLOAD_QUEUE_TIMEOUT`     | How long a download may wait for a free worker before the caller gets a `503`                                               | `30000` (30s)                                       |
 | `DOWNLOAD_JOB_TIMEOUT`       | Backstop covering queue wait plus execution; on expiry the caller gets a `504` and the worker is replaced                   | `DOWNLOAD_BUDGET + DOWNLOAD_MAX_DURATION + 30000`   |
@@ -380,6 +410,9 @@ All error responses include an `X-Reason` header with a human-readable message:
 - `405 Method Not Allowed`: Unsupported HTTP method
 - `416 Range Not Satisfiable`: Invalid range request
 - `500 Internal Server Error`: Server error
+- `502 Bad Gateway`: An upstream served bytes that did not hash to the requested id
+- `503 Service Unavailable`: Download queue is saturated, or a shared download was interrupted; retry after `Retry-After`
+- `504 Gateway Timeout`: Upstream download exceeded its deadline
 
 ## License
 

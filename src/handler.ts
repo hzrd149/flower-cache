@@ -2,8 +2,13 @@
 
 import type { ParsedRequest } from "./types";
 import { ensureCacheDir, checkCache } from "./cache";
-import { errorDownload, formatDurationMs, logDownload } from "./download-log";
-import { getOrCreateDownload } from "./request-queue";
+import {
+  errorDownload,
+  formatDurationMs,
+  logDownload,
+  warnDownload,
+} from "./download-log";
+import { getOrCreateDownload, type FollowerResult } from "./request-queue";
 import {
   getDownloadWorkerPool,
   DownloadJobTimeoutError,
@@ -12,6 +17,7 @@ import {
 } from "./worker-pool";
 import { isKnownMissing, markMissing } from "./negative-cache";
 import { resolveCandidateServers } from "./servers";
+import type { DownloadOutcome } from "./worker-protocol";
 import {
   getContentType,
   addCorsHeaders,
@@ -70,19 +76,25 @@ export async function handleBlobRequest(
     return createErrorResponse(404, "Blob not found");
   }
 
-  // Not in cache, try to fetch from upstream servers using request deduplication
+  // Not in cache, try to fetch from upstream servers using request deduplication.
+  // A plain full-body GET can be answered while the blob is still arriving; a
+  // HEAD has no body to stream, and a Range request wants bytes from an offset
+  // rather than a transfer from zero, so both keep the download-then-serve path.
+  const wantsStream = !isHead && !rangeHeader;
 
-  let downloadResult;
+  let ticket;
   try {
-    downloadResult = await getOrCreateDownload(sha256, async () => {
+    ticket = await getOrCreateDownload(sha256, async () => {
       const servers = await resolveCandidateServers(authorPubkeys, serverHints);
 
       if (servers.length === 0) {
-        return { found: false };
+        return { kind: "notFound" } as DownloadOutcome;
       }
 
       const workerPool = getDownloadWorkerPool();
-      return workerPool.download(sha256, servers, extension);
+      return workerPool.download(sha256, servers, extension, {
+        stream: wantsStream,
+      });
     });
   } catch (error) {
     if (
@@ -114,10 +126,56 @@ export async function handleBlobRequest(
     throw error;
   }
 
-  if (!downloadResult.found) {
+  // The blob is arriving now — answer with it rather than waiting for the last
+  // byte, the hash check and a re-read from disk.
+  if (ticket.role === "leader" && ticket.outcome.kind === "stream") {
+    return createStreamedResponse(
+      sha256,
+      ticket.outcome,
+      extension,
+      etag,
+      startedAt,
+    );
+  }
+
+  const result: FollowerResult =
+    ticket.role === "follower"
+      ? ticket.result
+      : ticket.outcome.kind === "cached"
+        ? "cached"
+        : "notFound";
+
+  if (result === "notFound") {
     markMissing(sha256);
     logDownload(sha256, `download not found ${formatDurationMs(startedAt)}`);
     return createErrorResponse(404, "Blob not found");
+  }
+
+  // Another request's transfer broke part-way (its client hung up, its worker
+  // was lost). Nothing was learned about the blob, so don't cache a verdict —
+  // just tell this caller to come back.
+  if (result === "failed") {
+    logDownload(
+      sha256,
+      `download interrupted upstream ${formatDurationMs(startedAt)}`,
+    );
+    return addCorsHeaders(
+      new Response("Download interrupted, try again", {
+        status: 503,
+        headers: { "Retry-After": "1" },
+      }),
+    );
+  }
+
+  // Another request streamed this blob out and the bytes turned out not to hash
+  // to the id we asked for, so nothing was cached. Don't poison the negative
+  // cache — the blob exists upstream, it just can't be trusted.
+  if (result === "unverified") {
+    warnDownload(
+      sha256,
+      `download unverified upstream ${formatDurationMs(startedAt)}`,
+    );
+    return createErrorResponse(502, "Upstream blob failed verification");
   }
 
   const downloadedFile = await checkCache(sha256);
@@ -142,6 +200,50 @@ export async function handleBlobRequest(
     `download served ${response.status} ${formatDurationMs(startedAt)}`,
   );
   return response;
+}
+
+/**
+ * Build a response whose body is the upstream transfer still in flight. The
+ * hash is only known once the last byte lands, so these bytes are served
+ * unverified; the cache itself stays trustworthy because the worker only
+ * commits a blob to disk when it hashes correctly.
+ */
+function createStreamedResponse(
+  sha256: string,
+  outcome: Extract<DownloadOutcome, { kind: "stream" }>,
+  extension: string | undefined,
+  etag: string,
+  startedAt: number,
+): Response {
+  const headers = new Headers({
+    "Content-Type": outcome.contentType || getContentType(extension),
+    "Accept-Ranges": "bytes",
+    ETag: etag,
+    ...getCacheControlHeaders(),
+  });
+
+  // Bun currently drops Content-Length on a ReadableStream body and sends the
+  // response chunked, so this is intent rather than effect today. Kept because
+  // the length is genuinely known and costs nothing to declare.
+  if (outcome.size !== undefined) {
+    headers.set("Content-Length", outcome.size.toString());
+  }
+
+  void outcome.completion.then((completion) => {
+    if (completion.verified) {
+      logDownload(
+        sha256,
+        `download streamed ${completion.size} bytes ${formatDurationMs(startedAt)}`,
+      );
+    } else {
+      warnDownload(
+        sha256,
+        `download streamed unverified (${completion.error ?? "hash mismatch"}) ${formatDurationMs(startedAt)}`,
+      );
+    }
+  });
+
+  return addCorsHeaders(new Response(outcome.body, { status: 200, headers }));
 }
 
 /**

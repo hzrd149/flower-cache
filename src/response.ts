@@ -104,19 +104,35 @@ export function getCacheControlHeaders(): Record<string, string> {
 
 /**
  * Add CORS headers to response
+ *
+ * Mutates the response in place. Rebuilding it as `new Response(response.body)`
+ * re-wraps a BunFile body as a generic stream, which costs the Content-Length
+ * (every blob response fell back to chunked encoding) and, for a sliced file,
+ * loses the end bound entirely — a `bytes=100-199` range was served as
+ * everything from byte 100 to EOF.
  */
 export function addCorsHeaders(response: Response): Response {
-  const headers = new Headers(response.headers);
-  headers.set(
-    "Access-Control-Allow-Origin",
-    CORS_HEADERS["Access-Control-Allow-Origin"],
-  );
+  try {
+    response.headers.set(
+      "Access-Control-Allow-Origin",
+      CORS_HEADERS["Access-Control-Allow-Origin"],
+    );
+    return response;
+  } catch {
+    // Guarded headers (e.g. a response handed straight back from fetch) can't
+    // be edited, so fall back to a copy.
+    const headers = new Headers(response.headers);
+    headers.set(
+      "Access-Control-Allow-Origin",
+      CORS_HEADERS["Access-Control-Allow-Origin"],
+    );
 
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
 }
 
 /**

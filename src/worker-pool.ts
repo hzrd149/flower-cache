@@ -8,21 +8,43 @@ import {
 } from "./config";
 import { errorDownload, warnDownload } from "./download-log";
 import type {
+  DownloadHeadersMessage,
   DownloadJob,
-  DownloadResult,
+  DownloadOutcome,
+  StreamCompletion,
   WorkerResponseMessage,
 } from "./worker-protocol";
 
+/** Main-thread end of a streamed transfer, live between headers and complete. */
+interface JobStream {
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  /** Never rejects — a failed stream reports through the errored body instead. */
+  finish: (completion: StreamCompletion) => void;
+  /** The body is closed, errored or cancelled; nothing more may be enqueued. */
+  closed: boolean;
+  /**
+   * The completion promise has been answered. Tracked apart from `closed`
+   * because a client cancelling closes the body without ending the transfer,
+   * and whoever is waiting on completion (the dedup queue, for one) must still
+   * be told how it finished.
+   */
+  reported: boolean;
+}
+
 interface TrackedJob {
   job: DownloadJob;
-  resolve: (result: DownloadResult) => void;
+  resolve: (outcome: DownloadOutcome) => void;
   reject: (error: Error) => void;
   /** Backstop covering queue wait plus execution. */
   jobTimer: ReturnType<typeof setTimeout>;
   /** Bounds queue wait only; cleared once the job reaches a worker. */
   queueTimer?: ReturnType<typeof setTimeout>;
   worker?: Worker;
+  /** The caller's promise has been answered. */
   settled: boolean;
+  /** The job reached a terminal state; timers cleared, worker recycled. */
+  finished: boolean;
+  stream?: JobStream;
 }
 
 /** Thrown when the download queue is at capacity and can't accept more work. */
@@ -75,7 +97,8 @@ export class DownloadWorkerPool {
     sha256: string,
     servers: string[],
     extension?: string,
-  ): Promise<DownloadResult> {
+    options: { stream?: boolean } = {},
+  ): Promise<DownloadOutcome> {
     if (this.isTerminating) {
       throw new Error("Download worker pool is shutting down");
     }
@@ -86,13 +109,14 @@ export class DownloadWorkerPool {
       throw new DownloadQueueFullError();
     }
 
-    return new Promise<DownloadResult>((resolve, reject) => {
+    return new Promise<DownloadOutcome>((resolve, reject) => {
       const job: DownloadJob = {
         type: "download",
         jobId: randomUUID(),
         sha256,
         extension,
         servers,
+        stream: options.stream,
       };
 
       const tracked: TrackedJob = {
@@ -100,6 +124,7 @@ export class DownloadWorkerPool {
         resolve,
         reject,
         settled: false,
+        finished: false,
         // Assigned immediately below; the timers need `tracked` to exist first.
         jobTimer: undefined as unknown as ReturnType<typeof setTimeout>,
       };
@@ -134,9 +159,15 @@ export class DownloadWorkerPool {
     this.idleWorkers.length = 0;
 
     for (const tracked of abandoned) {
-      this.settle(tracked, () =>
-        tracked.reject(new Error("Download worker pool terminated")),
-      );
+      const error = new Error("Download worker pool terminated");
+      this.failStream(tracked, error);
+      tracked.finished = true;
+      clearTimeout(tracked.jobTimer);
+      if (tracked.queueTimer) {
+        clearTimeout(tracked.queueTimer);
+        tracked.queueTimer = undefined;
+      }
+      this.settle(tracked, () => tracked.reject(error));
     }
 
     const workers = [...this.workers];
@@ -144,20 +175,104 @@ export class DownloadWorkerPool {
     await Promise.all(workers.map((worker) => worker.terminate()));
   }
 
-  /** Resolve or reject exactly once, clearing the job's timers. */
+  /** Answer the caller's promise exactly once. */
   private settle(tracked: TrackedJob, complete: () => void): void {
     if (tracked.settled) {
       return;
     }
 
     tracked.settled = true;
+    complete();
+  }
+
+  /**
+   * End a job for good: clear its timers, drop it from the pending map and hand
+   * the worker back. A streamed job settles its outcome long before this — the
+   * worker stays busy until the last chunk has been relayed.
+   */
+  private finish(tracked: TrackedJob): void {
+    if (tracked.finished) {
+      return;
+    }
+
+    tracked.finished = true;
     clearTimeout(tracked.jobTimer);
     if (tracked.queueTimer) {
       clearTimeout(tracked.queueTimer);
       tracked.queueTimer = undefined;
     }
 
-    complete();
+    // Backstop: nothing may leave a streamed job's completion unanswered — the
+    // dedup queue holds the hash in flight until it settles.
+    this.reportStream(tracked, {
+      size: 0,
+      verified: false,
+      error: "Download ended without a result",
+    });
+
+    this.pendingJobs.delete(tracked.job.jobId);
+    this.recycleWorker(tracked.worker, tracked);
+  }
+
+  private recycleWorker(
+    worker: Worker | undefined,
+    tracked?: TrackedJob,
+  ): void {
+    if (!worker) {
+      return;
+    }
+
+    if (!tracked || this.busyWorkers.get(worker) === tracked) {
+      this.busyWorkers.delete(worker);
+    }
+
+    // Only recycle a worker the pool still owns — a replaced one must stay out.
+    if (
+      !this.isTerminating &&
+      this.workers.has(worker) &&
+      !this.busyWorkers.has(worker) &&
+      !this.idleWorkers.includes(worker)
+    ) {
+      this.idleWorkers.push(worker);
+      this.dispatchNext();
+    }
+  }
+
+  /** Error a live response body, so a client never sees a silent truncation. */
+  private failStream(tracked: TrackedJob, error: Error): void {
+    const stream = tracked.stream;
+    if (!stream) {
+      return;
+    }
+
+    if (!stream.closed) {
+      stream.closed = true;
+      try {
+        stream.controller.error(error);
+      } catch {
+        // the body was already cancelled or closed
+      }
+    }
+
+    this.reportStream(tracked, {
+      size: 0,
+      verified: false,
+      error: error.message,
+    });
+  }
+
+  /** Answer a streamed transfer's completion promise exactly once. */
+  private reportStream(
+    tracked: TrackedJob,
+    completion: StreamCompletion,
+  ): void {
+    const stream = tracked.stream;
+    if (!stream || stream.reported) {
+      return;
+    }
+
+    stream.reported = true;
+    stream.finish(completion);
   }
 
   private removeFromQueue(tracked: TrackedJob): boolean {
@@ -222,8 +337,13 @@ export class DownloadWorkerPool {
       this.busyWorkers.delete(worker);
       this.pendingJobs.delete(tracked.job.jobId);
 
-      if (!tracked.settled) {
+      if (!tracked.finished) {
         errorDownload(tracked.job.sha256, `worker lost ${error.message}`);
+        // A job that was already streaming has an answered caller but a live
+        // body; break that rather than leaving the client hanging forever.
+        this.failStream(tracked, error);
+        tracked.finished = true;
+        clearTimeout(tracked.jobTimer);
         this.settle(tracked, () => tracked.reject(error));
       }
     }
@@ -310,7 +430,7 @@ export class DownloadWorkerPool {
   }
 
   private handleQueueTimeout(tracked: TrackedJob): void {
-    if (tracked.settled || !this.removeFromQueue(tracked)) {
+    if (tracked.finished || !this.removeFromQueue(tracked)) {
       return;
     }
 
@@ -318,11 +438,12 @@ export class DownloadWorkerPool {
       tracked.job.sha256,
       `download rejected after ${DOWNLOAD_QUEUE_TIMEOUT}ms waiting for a worker`,
     );
+    this.finish(tracked);
     this.settle(tracked, () => tracked.reject(new DownloadQueueTimeoutError()));
   }
 
   private handleJobTimeout(tracked: TrackedJob): void {
-    if (tracked.settled) {
+    if (tracked.finished) {
       return;
     }
 
@@ -333,6 +454,10 @@ export class DownloadWorkerPool {
       tracked.job.sha256,
       `download timed out after ${DOWNLOAD_JOB_TIMEOUT}ms`,
     );
+    // A streamed job has already answered its caller, so the deadline has to
+    // reach the client through the response body.
+    this.failStream(tracked, new DownloadJobTimeoutError());
+    tracked.finished = true;
     this.settle(tracked, () => tracked.reject(new DownloadJobTimeoutError()));
 
     // The worker is wedged on a job that should have bounded itself, so it
@@ -343,44 +468,155 @@ export class DownloadWorkerPool {
     }
   }
 
+  /**
+   * Open the client-facing body for a transfer the worker has just committed to
+   * streaming. The caller is answered here — long before the blob is verified —
+   * which is the entire point: time-to-first-byte stops being the length of the
+   * upstream transfer.
+   */
+  private beginStream(
+    tracked: TrackedJob,
+    worker: Worker,
+    message: DownloadHeadersMessage,
+  ): void {
+    if (tracked.stream || tracked.finished) {
+      return;
+    }
+
+    let finish!: (completion: StreamCompletion) => void;
+    const completion = new Promise<StreamCompletion>((resolve) => {
+      finish = resolve;
+    });
+
+    const body = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        tracked.stream = { controller, finish, closed: false, reported: false };
+      },
+      // One credit per drain. The worker blocks once it runs out, so a client
+      // reading slower than the upstream sends can't inflate memory here.
+      pull: () => {
+        if (!tracked.finished) {
+          worker.postMessage({
+            type: "download:pull",
+            jobId: tracked.job.jobId,
+          });
+        }
+      },
+      cancel: () => {
+        if (tracked.stream) {
+          tracked.stream.closed = true;
+        }
+        if (!tracked.finished) {
+          worker.postMessage({
+            type: "download:cancel",
+            jobId: tracked.job.jobId,
+          });
+        }
+      },
+    });
+
+    this.settle(tracked, () =>
+      tracked.resolve({
+        kind: "stream",
+        contentType: message.contentType,
+        size: message.size,
+        body,
+        completion,
+      }),
+    );
+  }
+
   private async handleWorkerMessage(
     worker: Worker,
     message: WorkerResponseMessage,
   ): Promise<void> {
     const tracked = this.pendingJobs.get(message.jobId);
-    this.pendingJobs.delete(message.jobId);
 
-    if (this.busyWorkers.get(worker) === tracked) {
-      this.busyWorkers.delete(worker);
+    // Mid-transfer traffic keeps the job (and its worker) in flight.
+    if (message.type === "download:headers") {
+      if (tracked) {
+        this.beginStream(tracked, worker, message);
+      }
+      return;
     }
 
-    // Only recycle a worker the pool still owns — a replaced one must stay out.
-    if (!this.isTerminating && this.workers.has(worker)) {
-      this.idleWorkers.push(worker);
-      this.dispatchNext();
+    if (message.type === "download:chunk") {
+      const stream = tracked?.stream;
+      if (stream && !stream.closed) {
+        try {
+          stream.controller.enqueue(new Uint8Array(message.buffer));
+        } catch {
+          // the client cancelled between chunks; the worker is being told
+        }
+      }
+      return;
     }
 
-    // Late reply for a job that already timed out, or an unknown job id.
-    if (!tracked || tracked.settled) {
+    // Everything below is terminal: the worker is done and can take more work.
+    if (!tracked) {
+      // Late reply for a job that already timed out, or an unknown job id.
+      this.recycleWorker(worker);
       return;
     }
 
     if (message.type === "download:complete") {
-      await updateAccessTime(message.sha256, message.size);
-      void pruneCacheIfNeeded();
+      const stream = tracked.stream;
+
+      // Nothing was written when the hash didn't match, so there is no entry to
+      // touch — but the bytes did go out, which the caller learns from
+      // `verified`.
+      if (message.verified) {
+        await updateAccessTime(message.sha256, message.size);
+        void pruneCacheIfNeeded();
+      }
+
+      if (stream) {
+        if (!stream.closed) {
+          stream.closed = true;
+          try {
+            stream.controller.close();
+          } catch {
+            // already cancelled by the client
+          }
+        }
+        this.reportStream(tracked, {
+          size: message.size,
+          verified: message.verified,
+        });
+        this.finish(tracked);
+        return;
+      }
+
+      this.finish(tracked);
       this.settle(tracked, () =>
-        tracked.resolve({ found: true, size: message.size }),
+        tracked.resolve(
+          message.verified
+            ? { kind: "cached", size: message.size }
+            : { kind: "notFound" },
+        ),
       );
       return;
     }
 
     if (message.type === "download:notFound") {
-      this.settle(tracked, () => tracked.resolve({ found: false }));
+      this.finish(tracked);
+      this.settle(tracked, () => tracked.resolve({ kind: "notFound" }));
+      return;
+    }
+
+    const error = new Error(message.error);
+    if (tracked.stream) {
+      // The caller already holds the body, so the failure has to travel through
+      // it rather than through the (already settled) outcome promise.
+      warnDownload(message.sha256, `stream failed ${message.error}`);
+      this.failStream(tracked, error);
+      this.finish(tracked);
       return;
     }
 
     errorDownload(message.sha256, `worker error ${message.error}`);
-    this.settle(tracked, () => tracked.reject(new Error(message.error)));
+    this.finish(tracked);
+    this.settle(tracked, () => tracked.reject(error));
   }
 }
 

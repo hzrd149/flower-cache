@@ -111,6 +111,64 @@ export const MAX_DOWNLOAD_QUEUE = Bun.env.MAX_DOWNLOAD_QUEUE
   ? parseInt(Bun.env.MAX_DOWNLOAD_QUEUE, 10)
   : 100;
 
+/**
+ * Parse size string (e.g., "10GB", "500MB", "1TB") into bytes
+ * @returns Size in bytes, or null if invalid format
+ */
+export function parseSize(sizeStr: string): number | null {
+  const match = sizeStr.trim().match(/^(\d+(?:\.\d+)?)\s*([KMGT]?B)$/i);
+  if (!match) return null;
+
+  const value = parseFloat(match[1]!);
+  const unit = match[2]!.toUpperCase();
+
+  const multipliers: Record<string, number> = {
+    B: 1,
+    KB: 1024,
+    MB: 1024 * 1024,
+    GB: 1024 * 1024 * 1024,
+    TB: 1024 * 1024 * 1024 * 1024,
+  };
+
+  const multiplier = multipliers[unit];
+  if (!multiplier) return null;
+
+  return Math.floor(value * multiplier);
+}
+
+/**
+ * Whether a cache miss may stream upstream bytes to the client while they are
+ * still being written and hashed. Time-to-first-byte on a miss otherwise equals
+ * the entire upstream transfer. Set to "false" to restore store-and-forward.
+ */
+export const STREAM_THROUGH = Bun.env.STREAM_THROUGH
+  ? Bun.env.STREAM_THROUGH !== "false" && Bun.env.STREAM_THROUGH !== "0"
+  : true;
+
+/**
+ * Upstream Content-Length at or above which a miss is streamed through. Below
+ * it the blob is downloaded, verified and only then served — that path is
+ * already fast at small sizes and keeps both multi-server failover and the
+ * guarantee that served bytes match the requested hash. An upstream that
+ * declares no length is treated as large, since that is exactly the case where
+ * blocking hurts most.
+ */
+export const STREAM_THROUGH_MIN_SIZE: number = Bun.env.STREAM_THROUGH_MIN_SIZE
+  ? (parseSize(Bun.env.STREAM_THROUGH_MIN_SIZE) ?? 2 * 1024 * 1024)
+  : 2 * 1024 * 1024; // 2MB
+
+/**
+ * How many chunks a download worker may push to the main thread before waiting
+ * for the response stream to ask for more. Bounds the bytes held in memory for
+ * a client that reads slower than the upstream sends.
+ */
+export const STREAM_CHUNK_CREDITS = Math.max(
+  1,
+  Bun.env.STREAM_CHUNK_CREDITS
+    ? parseInt(Bun.env.STREAM_CHUNK_CREDITS, 10) || 8
+    : 8,
+);
+
 /** Maximum redirect following depth */
 export const MAX_REDIRECTS = Bun.env.MAX_REDIRECTS
   ? parseInt(Bun.env.MAX_REDIRECTS, 10)
@@ -132,31 +190,6 @@ export const FALLBACK_SERVERS = Bun.env.FALLBACK_SERVERS
       .filter((r) => URL.canParse(r))
       .map((r) => new URL(r))
   : [];
-
-/**
- * Parse size string (e.g., "10GB", "500MB", "1TB") into bytes
- * @returns Size in bytes, or null if invalid format
- */
-function parseSize(sizeStr: string): number | null {
-  const match = sizeStr.trim().match(/^(\d+(?:\.\d+)?)\s*([KMGT]?B)$/i);
-  if (!match) return null;
-
-  const value = parseFloat(match[1]!);
-  const unit = match[2]!.toUpperCase();
-
-  const multipliers: Record<string, number> = {
-    B: 1,
-    KB: 1024,
-    MB: 1024 * 1024,
-    GB: 1024 * 1024 * 1024,
-    TB: 1024 * 1024 * 1024 * 1024,
-  };
-
-  const multiplier = multipliers[unit];
-  if (!multiplier) return null;
-
-  return Math.floor(value * multiplier);
-}
 
 /** Maximum cache size in bytes (null = no limit) */
 export const MAX_CACHE_SIZE: number | null = Bun.env.MAX_CACHE_SIZE
