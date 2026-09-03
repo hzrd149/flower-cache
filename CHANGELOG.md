@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 - 2026-09-03
+
+- Stream cache misses to the client while they download. Time-to-first-byte on a miss was previously the length of the entire upstream transfer: the body was read into a temp file in a download worker, hashed, verified and renamed, and only then did the handler re-open it from disk to answer. A blob above `STREAM_THROUGH_MIN_SIZE` (default 2MB) is now relayed to the client as it arrives — measured against a slow 8MB upstream, first byte dropped from 1.37s to 0.35s, and to 0.016s when the upstream declares a `Content-Length`. Set `STREAM_THROUGH=false` to restore store-and-forward.
+- Keep downloads in the worker pool while streaming, so the `DOWNLOAD_BUDGET`, stall, throughput and worker self-healing guards are unchanged. Chunks cross to the main thread as transferable buffers under a credit window (`STREAM_CHUNK_CREDITS`), so a client reading slower than the upstream sends cannot grow memory without bound.
+- Only commit verified blobs to the cache, as before: a streamed body is sent before its hash is known, and if it turns out wrong the client keeps what it received, a warning is logged and nothing is cached. Below the threshold the download-verify-serve path still runs, so small blobs keep both verification-before-send and failover to another server. An upstream that declares no `Content-Length` is measured as it arrives rather than assumed large, so the threshold behaves the same whether or not a size is declared.
+- Fix `addCorsHeaders` rebuilding every response as `new Response(response.body)`, which re-wrapped a `BunFile` body as a generic stream. This dropped `Content-Length` — every blob response fell back to chunked encoding — and lost a slice's end bound, so a `Range: bytes=100-199` request against an 8MB cached blob was answered with everything from byte 100 to the end of the file.
+- Answer a request whose shared download was interrupted with `503 Retry-After` rather than a `404`, so a cancelled or lost transfer no longer records a false miss for everyone else waiting on it.
+- Remove `src/stream-utils.ts`, `src/hash-stream.ts` and `src/cache-stream.ts`, an earlier tee-based version of this idea left unreferenced since the worker pool landed. Its `createCacheStream` wrote unverified bytes straight to the final cache path.
+
 ## 0.7.1 - 2026-08-12
 
 - Bound upstream body transfers with `DOWNLOAD_STALL_TIMEOUT`, `DOWNLOAD_MIN_SPEED`, and `DOWNLOAD_MAX_DURATION`. Nothing previously limited the body read once response headers arrived, so an upstream reached via `xs` that answered `200` and then trickled could pin a download worker indefinitely and starve the pool for every other request.
