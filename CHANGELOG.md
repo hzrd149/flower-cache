@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fix every request with an `as=` author hint waiting the full `USER_SERVER_LIST_TIMEOUT` (20s) when that author has no kind:10063 server list. The lookup waited for an event that never arrived, and no download timeout covered it because it runs before the download worker starts, so a miss was logged as `verify miss 211ms` but `download not found 20257ms`. The lookup now ends once every lookup relay has answered (or failed), and `USER_SERVER_LIST_TIMEOUT` is only a ceiling for unresponsive relays, with its default lowered to `5000`.
+- Remember authors with no server list for `NEGATIVE_CACHE_TTL`, so later blobs from the same author skip the relay lookup, and share one lookup between concurrent requests for the same author.
+- Look up multiple `as=` authors in parallel instead of one after another.
+
 ## 0.8.0 - 2026-09-03
 
 - Stream cache misses to the client while they download. Time-to-first-byte on a miss was previously the length of the entire upstream transfer: the body was read into a temp file in a download worker, hashed, verified and renamed, and only then did the handler re-open it from disk to answer. A blob above `STREAM_THROUGH_MIN_SIZE` (default 2MB) is now relayed to the client as it arrives — measured against a slow 8MB upstream, first byte dropped from 1.37s to 0.35s, and to 0.016s when the upstream declares a `Content-Length`. Set `STREAM_THROUGH=false` to restore store-and-forward.

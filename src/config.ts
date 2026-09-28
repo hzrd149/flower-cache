@@ -176,7 +176,7 @@ export const MAX_REDIRECTS = Bun.env.MAX_REDIRECTS
 
 export const USER_SERVER_LIST_TIMEOUT = Bun.env.USER_SERVER_LIST_TIMEOUT
   ? parseInt(Bun.env.USER_SERVER_LIST_TIMEOUT, 10)
-  : 20000; // 20 seconds
+  : 5000; // 5 seconds
 
 /** List of relays to use for looking up author servers */
 export const LOOKUP_RELAYS = Bun.env.LOOKUP_RELAYS

@@ -21,9 +21,12 @@ export async function resolveCandidateServers(
   const allServers: string[] = [...serverHints].map(normalizeServerUrlForMerge);
 
   if (authorPubkeys.length > 0 && LOOKUP_RELAYS.length > 0) {
-    for (const pubkey of authorPubkeys) {
-      const authorServers = await resolveAuthorServers(pubkey);
-      allServers.push(...authorServers.map(normalizeServerUrlForMerge));
+    // Look authors up in parallel, but keep their servers in request order
+    const authorServers = await Promise.all(
+      authorPubkeys.map(resolveAuthorServers),
+    );
+    for (const servers of authorServers) {
+      allServers.push(...servers.map(normalizeServerUrlForMerge));
     }
   }
 
