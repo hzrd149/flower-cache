@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 - 2026-09-28
 
 - Fix every request with an `as=` author hint waiting the full `USER_SERVER_LIST_TIMEOUT` (20s) when that author has no kind:10063 server list. The lookup waited for an event that never arrived, and no download timeout covered it because it runs before the download worker starts, so a miss was logged as `verify miss 211ms` but `download not found 20257ms`. The lookup now ends once every lookup relay has answered (or failed), and `USER_SERVER_LIST_TIMEOUT` is only a ceiling for unresponsive relays, with its default lowered to `5000`.
 - Remember authors with no server list for `NEGATIVE_CACHE_TTL`, so later blobs from the same author skip the relay lookup, and share one lookup between concurrent requests for the same author.
